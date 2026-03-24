@@ -1,0 +1,62 @@
+# ===========================================
+# 美亚航旅API MCP Server Docker Compose
+# ===========================================
+
+version: '3.8'
+
+services:
+  # MCP Server 服务
+  meiya-mcp-server:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: meiya-mcp-server
+    environment:
+      # API配置（使用.env文件中的值）
+      - MEIYA_API_URL=${MEIYA_API_URL:-https://api.meiya.com}
+      - MEIYA_USERNAME=${MEIYA_USERNAME}
+      - MEIYA_PASSWORD=${MEIYA_PASSWORD}
+      # MCP配置
+      - MCP_TRANSPORT=${MCP_TRANSPORT:-stdio}
+      - MCP_PORT=${MCP_PORT:-8000}
+      # 日志配置
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - LOG_FORMAT=${LOG_FORMAT:-console}
+    ports:
+      - "${MCP_PORT:-8000}:8000"
+    volumes:
+      - ./logs:/app/logs
+    restart: unless-stopped
+    networks:
+      - mcp-network
+    # 健康检查
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sys; sys.exit(0)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  # ===========================================
+  # 可选：MCP Inspector 用于调试
+  # ===========================================
+  # 取消注释以下内容以启用调试模式
+  # 运行: docker-compose --profile debug up
+  mcp-inspector:
+    image: ghcr.io/modelcontextprotocol/inspector:latest
+    container_name: mcp-inspector
+    ports:
+      - "5173:5173"
+    environment:
+      - MCP_SERVER_URL=http://meiya-mcp-server:8000
+    depends_on:
+      meiya-mcp-server:
+        condition: service_healthy
+    networks:
+      - mcp-network
+    profiles:
+      - debug
+
+networks:
+  mcp-network:
+    driver: bridge
