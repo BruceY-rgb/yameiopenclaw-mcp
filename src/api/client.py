@@ -1,600 +1,498 @@
 """
-美亚航旅API客户端
+腾云商旅 API 客户端
 
-提供对美亚航旅API的异步HTTP请求封装，支持Token认证、重试机制和错误处理。
-接口路径参考: https://meiya.apifox.cn/
+调用 https://sla.ontuotu.com 的 Java 后端接口，涵盖：
+  - 开放接口（公司密钥鉴权）：创建用户账号
+  - 认证接口：登录获取 Token
+  - 航班接口（Token 鉴权）：国际机票查询、退改签规则、订单详情
+  - 出行人接口（Token 鉴权）：创建/查询出行人
+  - 订单接口（Token 鉴权）：国际机票下单
+
+接口路径参考：FlightController.java（/api/flight/...）
 """
 
-import json
-import time
-import base64
-import hashlib
 import logging
-from typing import Optional, Dict, Any, List
-from dataclasses import dataclass
-
 import httpx
+from typing import Any, Dict, Optional
 
 logger = logging.getLogger(__name__)
 
-# ============================================================
-# 接口路径常量（严格对应官方文档 meiya.apifox.cn）
-# ============================================================
+# ─────────────────────────────────────────────
+# 基础地址
+# ─────────────────────────────────────────────
+BASE_URL = "https://sla.ontuotu.com"
 
-# 国际机票接口前缀
-_INTL_TICKET = "/supplier/supplierapi/thgeneralinterface/SupplierIntlTicket/v2"
-# 国际机票订单接口前缀（生单/验价/确认支付/查询/取消）
-_INTL_ORDER = "/supplier/supplierapi/thgeneralinterface/SupplierIntlToOrder/v2"
-# 国际国内机票公共接口前缀
-_TICKET_COMMON = "/supplier/supplierapi/thgeneralinterface/SupplierTicketCommon/v2"
+# ─────────────────────────────────────────────
+# 开放接口（公司密钥鉴权）
+# ─────────────────────────────────────────────
+API_OPEN_CREATE_USER   = "/api/open/user/create"      # 创建用户账号
 
-# 各接口完整路径
-API_SHOPPING = f"{_INTL_TICKET}/Shopping"
-API_SHOPPING_DATA_QUERY = f"{_INTL_TICKET}/ShoppingDataQuery"
-API_SHOPPING_MORE_PRICE = f"{_INTL_TICKET}/ShoppingMorePrice"
-API_TICKET_RULE_QUERY = f"{_INTL_TICKET}/TicketRuleQuery"
-API_PRICING = f"{_INTL_TICKET}/Pricing"
-API_PRICING_DATA_QUERY = f"{_INTL_TICKET}/PricingDataQuery"
-API_STOPOVER_QUERY = f"{_INTL_TICKET}/StopoverQuery"
-API_SHOPPING_FLIGHT = f"{_INTL_TICKET}/ShoppingFlight"
-API_ORDER_SAVE = f"{_INTL_ORDER}/TOOrderSave"
-API_ORDER_PAY_VER = f"{_INTL_ORDER}/OrderPayVer"
-API_ORDER_PAY_CONFIRM = f"{_INTL_ORDER}/OrderPayConfirm"
-API_ORDER_DETAIL_QUERY = f"{_INTL_ORDER}/TOOrderDetailQuery"
-API_ORDER_CANCEL = f"{_INTL_ORDER}/TOOrderCancel"
-API_VOYAGE_CHANGE = f"{_TICKET_COMMON}/VoyageChangeLibraryQuery"
+# ─────────────────────────────────────────────
+# 认证接口
+# ─────────────────────────────────────────────
+API_AUTH_CAPTCHA       = "/admin-api/auth/captcha"    # 获取图片验证码
+API_AUTH_LOGIN         = "/admin-api/auth/login"      # 用户登录，返回 token
+
+# ─────────────────────────────────────────────
+# 航班接口（Token 鉴权）
+# ─────────────────────────────────────────────
+# 国际机票
+API_INTL_SEARCH        = "/api/flight/intlsearch"         # 4.1 国际机票航班查询
+API_INTL_SEARCH_ASYNC  = "/api/flight/intlsearchasync"    # 4.1 国际机票航班异步查询
+API_INTL_TICKET_RULE   = "/api/flight/queryIntlShoppingRule"  # 4.2 国际退改签条款
+API_INTL_ORDER_DETAIL  = "/api/flight/intldetail"         # 4.6 国际机票订单详情查询
+API_INTL_SAVE_ORDER    = "/api/flight/intlsaveOrder"      # 4.3 国际机票订单采购生单
+
+# 国际改签
+API_INTL_TC_SEARCH     = "/api/flight/intltcsearch"       # 5.1 国际改签航班查询
+API_INTL_TC_DETAIL     = "/api/flight/intltcdetail"       # 5.6 国际改签订单详情
+
+# 国际退票
+API_INTL_TR_DETAIL     = "/api/flight/intltrdetail"       # 6.4 国际退票单详情
+
+# 国内机票
+API_DOM_SEARCH         = "/api/flight/searchFlights"      # 1.1 国内航班查询
+API_DOM_SEARCH_ASYNC   = "/api/flight/IDomesticShoppingPublish"   # 1.1 国内异步发布
+API_DOM_SEARCH_DATA    = "/api/flight/IGetDomesticShoppingData"   # 1.2 国内异步获取数据
+API_DOM_TICKET_RULE    = "/api/flight/queryShoppingRule"  # 1.3 国内退改条款
+API_DOM_ORDER_DETAIL   = "/api/flight/orderDetailQuery"   # 1.8 国内机票订单详情
+API_DOM_TC_SEARCH      = "/api/flight/tcsearch"           # 2.1 国内改签航班查询
+API_DOM_TC_DETAIL      = "/api/flight/tcdetail"           # 2.6 国内TC订单详情
+API_DOM_TR_DETAIL      = "/api/flight/trdetail"           # 3.4 国内退票单详情
+
+# 通知回调
+API_NOTICE_TO          = "/api/flight/meiyaTONotice"      # 下单通知
+API_NOTICE_TR          = "/api/flight/meiyaTRNotice"      # 退票单通知
+API_NOTICE_TC          = "/api/flight/meiyaTCNotice"      # 改签单通知
+
+# 机场数据
+API_AIRPORT_PAGE       = "/api/flight/getAirportPage"     # 获取机票地址分页
+
+# ─────────────────────────────────────────────
+# 出行人接口（Token 鉴权）
+# ─────────────────────────────────────────────
+API_PASSENGER_SAVE     = "/api/passenger/save"            # 创建出行人
+API_PASSENGER_LIST     = "/api/passenger/list"            # 出行人列表
 
 
-@dataclass
-class ApiResponse:
-    """API响应数据类"""
-    success: bool
-    data: Optional[Dict[str, Any]] = None
-    message: str = ""
-    code: int = 0
+class OntuotuApiClient:
+    """腾云商旅 API 客户端
 
+    支持两种鉴权模式：
+    1. 公司密钥模式（AppKey + AppSecret）：用于开放接口，如创建用户
+    2. Token 模式（Bearer Token）：用于业务接口，如查询航班、下单
 
-class MeiyaApiError(Exception):
-    """美亚航旅API错误"""
-
-    def __init__(self, message: str, code: Optional[int] = None, response: Optional[Dict] = None):
-        super().__init__(message)
-        self.message = message
-        self.code = code
-        self.response = response
-
-    def __str__(self):
-        if self.code:
-            return f"[错误码 {self.code}] {self.message}"
-        return self.message
-
-
-class MeiyaApiClient:
-    """美亚航旅API客户端
-
-    封装HTTP请求，处理底层通信，支持Token认证、重试机制和错误处理。
-
-    Token 签名算法（参考官方文档 meiya.apifox.cn 概述页）：
-      1. 获取当前时间戳（毫秒）
-      2. 将请求体序列化为 JSON 字符串
-      3. 拼接明文: username + pwd + timestamp + body_json
-      4. MD5 加密（取原始字节）
-      5. Base64 编码
+    使用方式：
+        client = OntuotuApiClient(app_key="xxx", app_secret="yyy")
+        token = await client.login(username, password)
+        client.set_token(token)
+        result = await client.search_intl_flights(...)
     """
 
     def __init__(
         self,
-        base_url: str,
-        username: str,
-        password: str,
+        app_key: str = "",
+        app_secret: str = "",
+        base_url: str = BASE_URL,
         timeout: float = 30.0,
-        max_retries: int = 3
+        max_retries: int = 3,
     ):
-        """初始化API客户端
-
-        Args:
-            base_url: API基础URL
-            username: API用户名（签约后获取）
-            password: API密码（签约后获取，需保密）
-            timeout: 请求超时时间（秒）
-            max_retries: 最大重试次数
-        """
-        self.base_url = base_url.rstrip('/')
-        self.username = username
-        self.password = password
+        self.app_key = app_key
+        self.app_secret = app_secret
+        self.base_url = base_url.rstrip("/")
         self.timeout = timeout
         self.max_retries = max_retries
+        self._token: Optional[str] = None
 
         self.session = httpx.AsyncClient(
+            base_url=self.base_url,
             timeout=httpx.Timeout(timeout),
-            headers={
-                "Accept": "application/json",
-                "User-Agent": "Meiya-MCP-Server/1.0"
-            }
+            follow_redirects=True,
         )
 
-        logger.info(f"API客户端初始化完成，base_url: {base_url}")
+    # ─────────────────────────────────────────
+    # Token 管理
+    # ─────────────────────────────────────────
 
-    def _generate_auth_headers(self, body: Dict[str, Any]) -> Dict[str, str]:
-        """生成美亚航旅认证头
+    def set_token(self, token: str):
+        """设置当前用户 Token"""
+        self._token = token
 
-        算法（参考官方文档 meiya.apifox.cn 概述页 JS 示例）:
-          mingwen = username + pwd + timestamp + JSON.stringify(body)
-          tokenArr = CryptoJS.MD5(CryptoJS.enc.Utf8.parse(mingwen))
-          token = CryptoJS.enc.Base64.stringify(tokenArr)
+    def clear_token(self):
+        """清除 Token"""
+        self._token = None
 
-        Args:
-            body: 请求体数据
-
-        Returns:
-            包含 UserName / TimeStamp / Token / Content-Type 的 Header 字典
-        """
-        timestamp = str(int(time.time() * 1000))
-
-        if body:
-            body_str = json.dumps(body, ensure_ascii=False, separators=(',', ':'))
-        else:
-            body_str = ""
-
-        mingwen = f"{self.username}{self.password}{timestamp}{body_str}"
-        md5_hash = hashlib.md5(mingwen.encode('utf-8')).digest()
-        token = base64.b64encode(md5_hash).decode('utf-8')
-
-        logger.debug(f"生成Token: username={self.username}, timestamp={timestamp}")
-
-        return {
-            "UserName": self.username,
-            "TimeStamp": timestamp,
-            "Token": token,
-            "Content-Type": "application/json"
-        }
+    # ─────────────────────────────────────────
+    # 底层 HTTP 请求
+    # ─────────────────────────────────────────
 
     async def request(
         self,
         method: str,
-        endpoint: str,
-        headers: Optional[Dict[str, str]] = None,
-        **kwargs
+        path: str,
+        *,
+        json: Optional[Dict[str, Any]] = None,
+        params: Optional[Dict[str, Any]] = None,
+        use_app_key: bool = False,
+        extra_headers: Optional[Dict[str, str]] = None,
     ) -> Dict[str, Any]:
-        """发送HTTP请求
+        """发送 HTTP 请求
 
         Args:
-            method: HTTP方法
-            endpoint: API端点（相对路径）
-            headers: 额外请求头
-            **kwargs: 其他参数（如json、params等）
+            method: HTTP 方法（GET/POST）
+            path: 接口路径（不含 base_url）
+            json: 请求体（JSON）
+            params: 查询参数
+            use_app_key: True 时使用公司密钥鉴权，False 时使用 Token 鉴权
+            extra_headers: 额外请求头
 
         Returns:
-            API响应数据
-
-        Raises:
-            MeiyaApiError: API调用失败
+            响应 JSON 数据
         """
-        url = f"{self.base_url}{endpoint}"
-        auth_headers = self._generate_auth_headers(kwargs.get('json', {}))
-        request_headers = {**auth_headers, **(headers or {})}
+        headers: Dict[str, str] = {"Content-Type": "application/json"}
 
-        last_error = None
-        for attempt in range(self.max_retries):
+        if use_app_key:
+            # 公司密钥鉴权
+            headers["AppKey"] = self.app_key
+            headers["AppSecret"] = self.app_secret
+        elif self._token:
+            # Token 鉴权
+            headers["Authorization"] = self._token
+
+        if extra_headers:
+            headers.update(extra_headers)
+
+        last_error: Optional[Exception] = None
+        for attempt in range(1, self.max_retries + 1):
             try:
-                logger.debug(f"发送请求: {method} {url}, 尝试 {attempt + 1}/{self.max_retries}")
-
+                logger.debug(f"[{method}] {path} (attempt {attempt})")
                 response = await self.session.request(
-                    method=method,
-                    url=url,
-                    headers=request_headers,
-                    **kwargs
+                    method,
+                    path,
+                    json=json,
+                    params=params,
+                    headers=headers,
                 )
-
                 response.raise_for_status()
                 data = response.json()
-
-                if not self._is_success(data):
-                    error_msg = data.get("description") or data.get("message") or data.get("msg") or "未知错误"
-                    error_code = data.get("code", -1)
-                    raise MeiyaApiError(error_msg, code=error_code, response=data)
-
-                logger.debug(f"请求成功: {method} {url}")
+                logger.debug(f"响应: {str(data)[:200]}")
                 return data
-
             except httpx.HTTPStatusError as e:
+                logger.warning(f"HTTP 错误 {e.response.status_code}: {path}")
                 last_error = e
-                logger.warning(f"HTTP错误: {e.response.status_code}, 尝试 {attempt + 1}")
-                if 400 <= e.response.status_code < 500:
-                    raise MeiyaApiError(f"HTTP错误: {e.response.status_code}")
-
-            except httpx.RequestError as e:
+                if e.response.status_code in (400, 401, 403, 404):
+                    break  # 不重试客户端错误
+            except (httpx.ConnectError, httpx.TimeoutException) as e:
+                logger.warning(f"网络错误 (attempt {attempt}): {e}")
                 last_error = e
-                logger.warning(f"请求错误: {e}, 尝试 {attempt + 1}")
 
-            except MeiyaApiError:
-                raise
+        raise RuntimeError(f"请求失败 [{method} {path}]: {last_error}")
 
-            except Exception as e:
-                last_error = e
-                logger.error(f"未知错误: {e}")
-                raise
+    # ─────────────────────────────────────────
+    # 开放接口：创建用户账号（公司密钥鉴权）
+    # ─────────────────────────────────────────
 
-            if attempt < self.max_retries - 1:
-                wait_time = 2 ** attempt
-                logger.info(f"等待 {wait_time} 秒后重试...")
-                await self._sleep(wait_time)
-
-        raise MeiyaApiError(f"请求失败，已重试{self.max_retries}次: {last_error}")
-
-    async def _sleep(self, seconds: float):
-        """异步休眠"""
-        import asyncio
-        await asyncio.sleep(seconds)
-
-    def _is_success(self, data: Dict[str, Any]) -> bool:
-        """检查API响应是否成功
-
-        官方文档说明：code 为 20000 表示成功，非 20000 表异常。
-        """
-        code = data.get("code")
-        if code is not None:
-            return str(code) == "20000" or code == 0
-        if "success" in data:
-            return data["success"] is True
-        return True
-
-    # ===========================================
-    # 国际机票接口封装（路径严格对应 meiya.apifox.cn）
-    # ===========================================
-
-    async def search_flights(
+    async def create_user(
         self,
-        dep_airport: str,
-        arr_airport: str,
-        dep_date: str,
-        adults: int = 1,
-        children: int = 0,
-        infants: int = 0,
-        cabin_types: Optional[List[str]] = None,
-        trip_type: str = "1",
-        is_direction: str = "0",
-        is_async: bool = False,
-        return_date: Optional[str] = None
+        username: str,
+        password: str,
+        real_name: Optional[str] = None,
+        phone: Optional[str] = None,
+        email: Optional[str] = None,
+        extra: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
-        """国际机票航班查询 (Shopping)
+        """通过公司密钥调用开放接口，创建用户账号
 
-        文档路径: POST /supplier/supplierapi/thgeneralinterface/SupplierIntlTicket/v2/Shopping
+        步骤 3：小龙虾使用公司账号密钥，调用开放接口，创建用户账号密码。
 
         Args:
-            dep_airport: 出发地机场代码（如 PEK）
-            arr_airport: 目的地机场代码（如 JFK）
-            dep_date: 出发日期（YYYY-MM-DD）
-            adults: 成人数量
-            children: 儿童数量
-            infants: 婴儿数量
-            cabin_types: 舱位等级列表，如 ["0"]（0=经济舱 1=豪华经济舱 3=商务舱 4=头等舱）
-            trip_type: 行程类别（1=单程 2=往返 3=联程 4=缺口程）
-            is_direction: 飞行偏好（0=不限 1=直飞 2=最大中转1次 3=最大中转2次）
-            is_async: 是否异步查询
-            return_date: 返程日期（往返时使用，格式 YYYY-MM-DD）
+            username: 用户名
+            password: 密码
+            real_name: 真实姓名（可选）
+            phone: 手机号（可选）
+            email: 邮箱（可选）
+            extra: 其他扩展字段
 
         Returns:
-            航班查询结果，包含 detail.serialNumber 和 detail.flightDetailList
+            创建结果，包含 userId 等信息
         """
-        if cabin_types is None:
-            cabin_types = ["0"]
-
-        origin_destinations = [{
-            "depAirport": dep_airport,
-            "arrAirport": arr_airport,
-            "depDate": dep_date,
-            "cabinTypes": cabin_types
-        }]
-
-        # 往返时添加返程段
-        if trip_type == "2" and return_date:
-            origin_destinations.append({
-                "depAirport": arr_airport,
-                "arrAirport": dep_airport,
-                "depDate": return_date,
-                "cabinTypes": cabin_types
-            })
-
-        passengers = []
-        if adults > 0:
-            passengers.append({"passengerType": 0, "count": adults})
-        if children > 0:
-            passengers.append({"passengerType": 1, "count": children})
-        if infants > 0:
-            passengers.append({"passengerType": 2, "count": infants})
-
-        request_data = {
-            "isDirection": is_direction,
-            "originDestinations": origin_destinations,
-            "passengers": passengers,
-            "tripType": trip_type,
-            "isAsync": is_async,
-            "isRetrunTransferBaggage_visas": False
+        body: Dict[str, Any] = {
+            "username": username,
+            "password": password,
         }
+        if real_name:
+            body["realName"] = real_name
+        if phone:
+            body["phone"] = phone
+        if email:
+            body["email"] = email
+        if extra:
+            body.update(extra)
 
-        return await self.request("POST", API_SHOPPING, json=request_data)
-
-    async def get_shopping_data(self, serial_number: str) -> Dict[str, Any]:
-        """获取异步查询结果 (ShoppingDataQuery)
-
-        文档路径: POST /supplier/supplierapi/thgeneralinterface/SupplierIntlTicket/v2/ShoppingDataQuery
-
-        Args:
-            serial_number: Shopping 接口返回的 serialNumber
-
-        Returns:
-            异步查询结果
-        """
         return await self.request(
             "POST",
-            API_SHOPPING_DATA_QUERY,
-            json={"serialNumber": serial_number}
+            API_OPEN_CREATE_USER,
+            json=body,
+            use_app_key=True,
         )
 
-    async def get_flight_details(self, flight_id: str, serial_number: str) -> Dict[str, Any]:
-        """获取航班明细 (ShoppingFlight)
+    # ─────────────────────────────────────────
+    # 认证接口：登录获取 Token
+    # ─────────────────────────────────────────
 
-        文档路径: POST /supplier/supplierapi/thgeneralinterface/SupplierIntlTicket/v2/ShoppingFlight
+    async def get_captcha(self) -> bytes:
+        """获取图片验证码（返回图片二进制）"""
+        response = await self.session.get(API_AUTH_CAPTCHA)
+        response.raise_for_status()
+        return response.content
 
-        Args:
-            flight_id: 航班 ID（Shopping 接口返回的 flightID）
-            serial_number: Shopping 接口返回的 serialNumber
-
-        Returns:
-            航班明细信息
-        """
-        return await self.request(
-            "POST",
-            API_SHOPPING_FLIGHT,
-            json={"flightID": flight_id, "serialNumber": serial_number}
-        )
-
-    async def get_more_price(self, flight_id: str, serial_number: str) -> Dict[str, Any]:
-        """获取更多价格（全舱位）(ShoppingMorePrice)
-
-        文档路径: POST /supplier/supplierapi/thgeneralinterface/SupplierIntlTicket/v2/ShoppingMorePrice
-
-        Args:
-            flight_id: 航班 ID
-            serial_number: Shopping 接口返回的 serialNumber
-
-        Returns:
-            全舱位价格列表
-        """
-        return await self.request(
-            "POST",
-            API_SHOPPING_MORE_PRICE,
-            json={"flightID": flight_id, "serialNumber": serial_number}
-        )
-
-    async def query_ticket_rule(self, flight_id: str, serial_number: str) -> Dict[str, Any]:
-        """查询退改签规则 (TicketRuleQuery)
-
-        文档路径: POST /supplier/supplierapi/thgeneralinterface/SupplierIntlTicket/v2/TicketRuleQuery
-
-        Args:
-            flight_id: 航班 ID
-            serial_number: Shopping 接口返回的 serialNumber
-
-        Returns:
-            退改签规则
-        """
-        return await self.request(
-            "POST",
-            API_TICKET_RULE_QUERY,
-            json={"flightID": flight_id, "serialNumber": serial_number}
-        )
-
-    async def pricing(
+    async def login(
         self,
-        flight_id: str,
-        serial_number: str,
-        airline: str,
-        passengers: Optional[List[Dict[str, Any]]] = None,
-        is_async: bool = False
-    ) -> Dict[str, Any]:
-        """国际机票计价 (Pricing) - 实时航班计价模式
+        username: str,
+        password: str,
+        code: str = "",
+        uuid: str = "",
+    ) -> str:
+        """登录获取 Token
 
-        文档路径: POST /supplier/supplierapi/thgeneralinterface/SupplierIntlTicket/v2/Pricing
-
-        计价模式说明：
-          - 实时航班计价：需同时传 serialNumber 和 flightID（本方法默认使用此模式）
-          - PNR 计价：传 PNR 字段（需另行调用）
-          - 航段计价：传 flightList（需另行调用）
+        步骤 4：小龙虾使用用户账号密码，调用登录接口，得到 token。
 
         Args:
-            flight_id: 航班 ID（Shopping 接口返回的 flightID）
-            serial_number: Shopping 接口返回的 serialNumber
-            airline: 出票航司二字码
-            passengers: 乘客类型列表，如 [{"passengerType": 0, "passengerCount": 1}]
-            is_async: 是否异步计价
+            username: 用户名
+            password: 密码
+            code: 图片验证码（运营后台登录需要，开放 API 登录可为空）
+            uuid: 验证码 UUID（与 code 配套）
 
         Returns:
-            计价结果，包含 detail[].serialNumber（即 policySerialNumber）
+            token 字符串
         """
-        if passengers is None:
-            passengers = [{"passengerType": 0, "passengerCount": 1}]
-
-        request_data = {
-            "airline": airline,
-            "passengerTypeList": passengers,
-            "serialNumber": serial_number,
-            "flightID": flight_id,
-            "isAsync": is_async
+        body: Dict[str, Any] = {
+            "username": username,
+            "password": password,
+            "code": code,
+            "uuid": uuid,
         }
+        resp = await self.request("POST", API_AUTH_LOGIN, json=body)
 
-        return await self.request("POST", API_PRICING, json=request_data)
+        # 响应结构：{"code":"000000","message":"成功","value":"<token>"}
+        code_val = resp.get("code", "")
+        if code_val != "000000":
+            raise RuntimeError(
+                f"登录失败: code={code_val}, message={resp.get('message')}"
+            )
 
-    async def get_pricing_data(self, request_key: str) -> Dict[str, Any]:
-        """获取异步计价结果 (PricingDataQuery)
+        token = resp.get("value") or resp.get("data", {}).get("token", "")
+        if not token:
+            raise RuntimeError(f"登录响应中未找到 token: {resp}")
 
-        文档路径: POST /supplier/supplierapi/thgeneralinterface/SupplierIntlTicket/v2/PricingDataQuery
+        self._token = token
+        logger.info(f"用户 [{username}] 登录成功，已缓存 Token")
+        return token
+
+    # ─────────────────────────────────────────
+    # 国际机票接口（Token 鉴权）
+    # ─────────────────────────────────────────
+
+    async def search_intl_flights(self, body: Dict[str, Any]) -> Dict[str, Any]:
+        """4.1 国际机票航班查询（Shopping）
+
+        路径: POST /api/flight/intlsearch
 
         Args:
-            request_key: Pricing 接口异步模式返回的 requestKey
+            body: 查询参数，参考 FlightInternalReq，常用字段：
+                - tripType: 行程类型（1=单程 2=往返）
+                - fromCity: 出发城市/机场代码
+                - toCity: 目的地城市/机场代码
+                - fromDate: 出发日期（yyyy-MM-dd）
+                - returnDate: 返程日期（往返时必填）
+                - adultCount: 成人数量
+                - childCount: 儿童数量
+                - infantCount: 婴儿数量
+                - cabin: 舱位（Y=经济 C=商务 F=头等）
+        """
+        return await self.request("POST", API_INTL_SEARCH, json=body)
 
-        Returns:
-            计价结果
+    async def search_intl_flights_async(self, body: Dict[str, Any]) -> Dict[str, Any]:
+        """4.1 国际机票航班异步查询（ShoppingDataQuery）
+
+        路径: POST /api/flight/intlsearchasync
+        """
+        return await self.request("POST", API_INTL_SEARCH_ASYNC, json=body)
+
+    async def query_intl_ticket_rule(self, body: Dict[str, Any]) -> Dict[str, Any]:
+        """4.2 国际机票退改签条款查询（TicketRuleQuery）
+
+        路径: POST /api/flight/queryIntlShoppingRule
+        """
+        return await self.request("POST", API_INTL_TICKET_RULE, json=body)
+
+    async def save_intl_order(self, body: Dict[str, Any]) -> Dict[str, Any]:
+        """4.3 国际机票订单采购生单（TOOrderSave）
+
+        路径: POST /api/flight/intlsaveOrder
+
+        步骤 7：小龙虾使用 token，国际机票下单。
+
+        Args:
+            body: 下单参数，常用字段：
+                - flightId: 航班 ID（来自 intlsearch 结果）
+                - serialNumber: 序列号（来自 intlsearch 结果）
+                - policySerialNumber: 策略序列号（来自计价结果）
+                - passengerList: 出行人列表（含 passengerId 或完整出行人信息）
+                - contactName: 联系人姓名
+                - contactPhone: 联系人电话
+                - contactEmail: 联系人邮箱
+        """
+        return await self.request("POST", API_INTL_SAVE_ORDER, json=body)
+
+    async def query_intl_order_detail(self, body: Dict[str, Any]) -> Dict[str, Any]:
+        """4.6 国际机票订单详情查询（TOOrderDetailQuery）
+
+        路径: POST /api/flight/intldetail
+        """
+        return await self.request("POST", API_INTL_ORDER_DETAIL, json=body)
+
+    async def search_intl_tc_flights(self, body: Dict[str, Any]) -> Dict[str, Any]:
+        """5.1 国际改签航班查询（TCShoppingInternal）
+
+        路径: POST /api/flight/intltcsearch
+
+        Args:
+            body: 查询参数，参考 FlightTCShoppingInternalReq
+        """
+        return await self.request("POST", API_INTL_TC_SEARCH, json=body)
+
+    async def query_intl_tc_order_detail(self, body: Dict[str, Any]) -> Dict[str, Any]:
+        """5.6 国际改签订单详情（TCOrderDetailQueryInternal）
+
+        路径: POST /api/flight/intltcdetail
+        """
+        return await self.request("POST", API_INTL_TC_DETAIL, json=body)
+
+    async def query_intl_tr_order_detail(self, body: Dict[str, Any]) -> Dict[str, Any]:
+        """6.4 国际退票单详情（TROrderDetailQueryInternal）
+
+        路径: POST /api/flight/intltrdetail
+        """
+        return await self.request("POST", API_INTL_TR_DETAIL, json=body)
+
+    # ─────────────────────────────────────────
+    # 国内机票接口（Token 鉴权）
+    # ─────────────────────────────────────────
+
+    async def search_dom_flights(self, body: Dict[str, Any]) -> Dict[str, Any]:
+        """1.1 国内航班查询
+
+        路径: POST /api/flight/searchFlights
+        """
+        return await self.request("POST", API_DOM_SEARCH, json=body)
+
+    async def search_dom_flights_async_publish(self, body: Dict[str, Any]) -> Dict[str, Any]:
+        """1.1 国内航班异步查询（发布）
+
+        路径: POST /api/flight/IDomesticShoppingPublish
+        """
+        return await self.request("POST", API_DOM_SEARCH_ASYNC, json=body)
+
+    async def search_dom_flights_async_data(self, body: Dict[str, Any]) -> Dict[str, Any]:
+        """1.2 国内航班异步查询（获取数据）
+
+        路径: POST /api/flight/IGetDomesticShoppingData
+        """
+        return await self.request("POST", API_DOM_SEARCH_DATA, json=body)
+
+    async def query_dom_ticket_rule(self, body: Dict[str, Any]) -> Dict[str, Any]:
+        """1.3 国内退改条款查询
+
+        路径: POST /api/flight/queryShoppingRule
+        """
+        return await self.request("POST", API_DOM_TICKET_RULE, json=body)
+
+    async def query_dom_order_detail(self, body: Dict[str, Any]) -> Dict[str, Any]:
+        """1.8 国内机票订单详情查询
+
+        路径: POST /api/flight/orderDetailQuery
+        """
+        return await self.request("POST", API_DOM_ORDER_DETAIL, json=body)
+
+    async def search_dom_tc_flights(self, body: Dict[str, Any]) -> Dict[str, Any]:
+        """2.1 国内改签航班查询
+
+        路径: POST /api/flight/tcsearch
+        """
+        return await self.request("POST", API_DOM_TC_SEARCH, json=body)
+
+    async def query_dom_tc_order_detail(self, body: Dict[str, Any]) -> Dict[str, Any]:
+        """2.6 国内TC订单详情查询
+
+        路径: POST /api/flight/tcdetail
+        """
+        return await self.request("POST", API_DOM_TC_DETAIL, json=body)
+
+    async def query_dom_tr_order_detail(self, body: Dict[str, Any]) -> Dict[str, Any]:
+        """3.4 国内退票单详情
+
+        路径: POST /api/flight/trdetail
+        """
+        return await self.request("POST", API_DOM_TR_DETAIL, json=body)
+
+    # ─────────────────────────────────────────
+    # 出行人接口（Token 鉴权）
+    # ─────────────────────────────────────────
+
+    async def save_passenger(self, body: Dict[str, Any]) -> Dict[str, Any]:
+        """创建出行人
+
+        路径: POST /api/passenger/save
+
+        步骤 6：小龙虾使用 token，创建出行人。
+
+        Args:
+            body: 出行人信息，常用字段：
+                - name: 姓名
+                - passengerType: 乘客类型（0=成人 1=儿童 2=婴儿）
+                - nationality: 国籍二字码
+                - idType: 证件类型（0=护照 等）
+                - idNumber: 证件号码
+                - idExpiration: 证件有效期（yyyy-MM-dd）
+                - gender: 性别（1=男 0=女）
+                - birthday: 出生日期（yyyy-MM-dd）
+                - phone: 手机号（可选）
+                - email: 邮箱（可选）
+        """
+        return await self.request("POST", API_PASSENGER_SAVE, json=body)
+
+    async def list_passengers(self, body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """查询出行人列表
+
+        路径: POST /api/passenger/list
+        """
+        return await self.request("POST", API_PASSENGER_LIST, json=body or {})
+
+    # ─────────────────────────────────────────
+    # 机场数据接口
+    # ─────────────────────────────────────────
+
+    async def get_airport_page(self, page_num: int = 1, page_size: int = 20) -> Dict[str, Any]:
+        """获取机场/城市数据分页
+
+        路径: POST /api/flight/getAirportPage
         """
         return await self.request(
             "POST",
-            API_PRICING_DATA_QUERY,
-            json={"requestKey": request_key}
+            API_AIRPORT_PAGE,
+            json={"pageNum": page_num, "pageSize": page_size},
         )
 
-    async def query_stopover(self, flight_id: str, serial_number: str) -> Dict[str, Any]:
-        """查询经停信息 (StopoverQuery)
-
-        文档路径: POST /supplier/supplierapi/thgeneralinterface/SupplierIntlTicket/v2/StopoverQuery
-
-        Args:
-            flight_id: 航班 ID
-            serial_number: Shopping 接口返回的 serialNumber
-
-        Returns:
-            经停信息
-        """
-        return await self.request(
-            "POST",
-            API_STOPOVER_QUERY,
-            json={"flightID": flight_id, "serialNumber": serial_number}
-        )
-
-    async def create_order(self, order_data: Dict[str, Any]) -> Dict[str, Any]:
-        """国际机票订单采购生单 (TOOrderSave)
-
-        文档路径: POST /supplier/supplierapi/thgeneralinterface/SupplierIntlToOrder/v2/TOOrderSave
-
-        生单模式：
-          - createOrderType=1：实时航班下单（需 policySerialNumber）
-          - createOrderType=2：PNR 下单
-          - createOrderType=3：航段导入下单
-
-        Args:
-            order_data: 订单数据，必须包含 policySerialNumber、createOrderType、passengerList、contact
-
-        Returns:
-            生单结果
-        """
-        return await self.request("POST", API_ORDER_SAVE, json=order_data)
-
-    async def verify_order(self, order_id: str) -> Dict[str, Any]:
-        """国际机票订单验价验舱 (OrderPayVer)
-
-        文档路径: POST /supplier/supplierapi/thgeneralinterface/SupplierIntlToOrder/v2/OrderPayVer
-
-        Args:
-            order_id: 订单号
-
-        Returns:
-            验价验舱结果
-        """
-        return await self.request(
-            "POST",
-            API_ORDER_PAY_VER,
-            json={"orderId": order_id}
-        )
-
-    async def confirm_pay(
-        self,
-        order_id: str,
-        payment_method: str = "online"
-    ) -> Dict[str, Any]:
-        """国际机票订单确认支付 (OrderPayConfirm)
-
-        文档路径: POST /supplier/supplierapi/thgeneralinterface/SupplierIntlToOrder/v2/OrderPayConfirm
-
-        Args:
-            order_id: 订单号
-            payment_method: 支付方式（online/offline）
-
-        Returns:
-            支付结果
-        """
-        return await self.request(
-            "POST",
-            API_ORDER_PAY_CONFIRM,
-            json={"orderId": order_id, "paymentMethod": payment_method}
-        )
-
-    async def query_order(self, order_id: str) -> Dict[str, Any]:
-        """国际机票订单详情查询 (TOOrderDetailQuery)
-
-        文档路径: POST /supplier/supplierapi/thgeneralinterface/SupplierIntlToOrder/v2/TOOrderDetailQuery
-
-        Args:
-            order_id: 订单号
-
-        Returns:
-            订单详情
-        """
-        return await self.request(
-            "POST",
-            API_ORDER_DETAIL_QUERY,
-            json={"orderId": order_id}
-        )
-
-    async def cancel_order(
-        self,
-        order_id: str,
-        reason: Optional[str] = None
-    ) -> Dict[str, Any]:
-        """国际机票订单取消 (TOOrderCancel)
-
-        文档路径: POST /supplier/supplierapi/thgeneralinterface/SupplierIntlToOrder/v2/TOOrderCancel
-
-        Args:
-            order_id: 订单号
-            reason: 取消原因
-
-        Returns:
-            取消结果
-        """
-        return await self.request(
-            "POST",
-            API_ORDER_CANCEL,
-            json={"orderId": order_id, "reason": reason or "用户取消"}
-        )
-
-    async def get_flight_change(
-        self,
-        begin_date: str,
-        end_date: str,
-        order_id: Optional[str] = None,
-        status: int = -1,
-        page_index: int = 1,
-        page_size: int = 20
-    ) -> Dict[str, Any]:
-        """查询航变信息 (VoyageChangeLibraryQuery)
-
-        文档路径: POST /supplier/supplierapi/thgeneralinterface/SupplierTicketCommon/v2/VoyageChangeLibraryQuery
-
-        Args:
-            begin_date: 查询开始时间（yyyy-MM-dd）
-            end_date: 查询结束时间（yyyy-MM-dd）
-            order_id: TO 或 TC 订单号（可选）
-            status: 航变状态（-1=所有 0=未查阅 1=已查阅）
-            page_index: 页码（从 1 开始）
-            page_size: 每页数量（最大 100）
-
-        Returns:
-            航变信息列表
-        """
-        request_data = {
-            "beginDate": begin_date,
-            "endDate": end_date,
-            "status": status,
-            "isAll": 0,
-            "pageIndex": page_index,
-            "pageSize": page_size
-        }
-        if order_id:
-            request_data["orderId"] = order_id
-
-        return await self.request("POST", API_VOYAGE_CHANGE, json=request_data)
+    # ─────────────────────────────────────────
+    # 生命周期
+    # ─────────────────────────────────────────
 
     async def close(self):
-        """关闭HTTP客户端"""
+        """关闭 HTTP 客户端"""
         await self.session.aclose()
-        logger.info("API客户端已关闭")
+        logger.info("API 客户端已关闭")
+
+
+# 向后兼容别名（旧代码引用 MeiyaApiClient 的地方不需要改动）
+MeiyaApiClient = OntuotuApiClient

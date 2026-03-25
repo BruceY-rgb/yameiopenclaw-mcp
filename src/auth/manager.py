@@ -1,7 +1,10 @@
 """
 认证管理器
 
-负责管理用户Token生命周期，包括Token生成、缓存、自动刷新等功能。
+负责管理用户 Token 的生命周期，包括：
+  - 通过 /admin-api/auth/login 登录获取 Token
+  - Token 内存缓存与自动刷新
+  - 多用户并发支持
 """
 
 import time
@@ -9,216 +12,149 @@ import logging
 from typing import Optional, Dict
 from dataclasses import dataclass, field
 
-from src.api.client import MeiyaApiClient
+from src.api.client import OntuotuApiClient
 
 logger = logging.getLogger(__name__)
 
 
 @dataclass
 class TokenInfo:
-    """Token信息"""
+    """Token 信息"""
     access_token: str
-    refresh_token: Optional[str]
-    expires_at: float
-    token_type: str = "Bearer"
-    user_id: Optional[str] = None
+    expires_at: float          # Unix 时间戳，Token 过期时间
+    username: str = ""
 
 
 class AuthManager:
     """认证管理器
 
-    负责管理用户Token的生命周期，提供Token缓存和自动刷新功能。
+    管理用户 Token 的生命周期，提供 Token 缓存和自动刷新功能。
+
+    使用示例：
+        manager = AuthManager(api_client)
+        token = await manager.get_token("user1", "pass1")
+        # 后续调用会自动使用缓存，过期前自动刷新
     """
 
-    def __init__(self, api_client: MeiyaApiClient):
-        """初始化认证管理器
+    # Token 默认有效期（秒）。腾云商旅 JWT 通常为 180 天，
+    # 这里保守设置为 7200 秒（2 小时），以便及时刷新。
+    DEFAULT_EXPIRES_IN = 7200
 
-        Args:
-            api_client: API客户端实例
-        """
+    # 提前多少秒认为 Token 即将过期，触发刷新
+    REFRESH_BUFFER = 300
+
+    def __init__(self, api_client: OntuotuApiClient):
         self.api_client = api_client
-        self._token_cache: Dict[str, TokenInfo] = {}
-        self._buffer_seconds = 300  # 提前5分钟过期
-        self._default_expires_in = 7200  # 默认2小时
+        self._cache: Dict[str, TokenInfo] = {}
 
-    async def get_user_token(
+    # ─────────────────────────────────────────
+    # 公开接口
+    # ─────────────────────────────────────────
+
+    async def get_token(
         self,
-        user_id: str,
+        username: str,
         password: str,
-        force_refresh: bool = False
+        force_refresh: bool = False,
     ) -> str:
-        """获取用户Token（带缓存）
+        """获取用户 Token（带缓存）
+
+        步骤 4：小龙虾使用用户账号密码，调用登录接口，得到 token。
 
         Args:
-            user_id: 用户ID
+            username: 用户名
             password: 用户密码
-            force_refresh: 强制刷新Token
+            force_refresh: True 时强制重新登录
 
         Returns:
-            access_token
+            token 字符串
         """
-        cache_key = self._get_cache_key(user_id, password)
+        cache_key = self._cache_key(username, password)
 
-        # 检查缓存
-        if not force_refresh and cache_key in self._token_cache:
-            token_info = self._token_cache[cache_key]
-            if time.time() < token_info.expires_at - self._buffer_seconds:
-                logger.debug(f"使用缓存的Token: {user_id}")
-                return token_info.access_token
-            else:
-                logger.debug(f"Token即将过期: {user_id}")
+        if not force_refresh:
+            info = self._cache.get(cache_key)
+            if info and time.time() < info.expires_at - self.REFRESH_BUFFER:
+                logger.debug(f"使用缓存 Token: {username}")
+                return info.access_token
+            elif info:
+                logger.debug(f"Token 即将过期，重新登录: {username}")
 
-        # 调用登录接口
-        logger.info(f"正在登录用户: {user_id}")
+        return await self._do_login(username, password, cache_key)
 
-        try:
-            response = await self.api_client.request(
-                "POST",
-                "/auth/login",
-                json={
-                    "userId": user_id,
-                    "password": password
-                }
-            )
+    async def refresh_token(self, username: str, password: str) -> str:
+        """强制刷新 Token"""
+        cache_key = self._cache_key(username, password)
+        self._cache.pop(cache_key, None)
+        return await self._do_login(username, password, cache_key)
 
-            data = response.get("data", {})
-            access_token = data.get("access_token")
-            refresh_token = data.get("refresh_token")
-            expires_in = data.get("expires_in", self._default_expires_in)
+    def set_token_manually(
+        self,
+        username: str,
+        password: str,
+        token: str,
+        expires_in: Optional[int] = None,
+    ):
+        """手动写入 Token（用于测试或外部注入）"""
+        cache_key = self._cache_key(username, password)
+        expires_in = expires_in or self.DEFAULT_EXPIRES_IN
+        self._cache[cache_key] = TokenInfo(
+            access_token=token,
+            expires_at=time.time() + expires_in,
+            username=username,
+        )
+        logger.info(f"手动写入 Token: {username}, 有效期 {expires_in}s")
 
-            # 缓存Token
-            token_info = TokenInfo(
-                access_token=access_token,
-                refresh_token=refresh_token,
-                expires_at=time.time() + expires_in,
-                user_id=user_id
-            )
-            self._token_cache[cache_key] = token_info
-
-            logger.info(f"用户登录成功: {user_id}, Token有效期: {expires_in}秒")
-            return access_token
-
-        except Exception as e:
-            logger.error(f"用户登录失败: {user_id}, 错误: {e}")
-            raise
-
-    async def refresh_user_token(self, user_id: str, password: str) -> str:
-        """刷新用户Token
-
-        Args:
-            user_id: 用户ID
-            password: 用户密码
-
-        Returns:
-            新的access_token
-        """
-        cache_key = self._get_cache_key(user_id, password)
-
-        # 清除缓存
-        if cache_key in self._token_cache:
-            del self._token_cache[cache_key]
-
-        # 重新获取
-        return await self.get_user_token(user_id, password, force_refresh=True)
-
-    def clear_cache(self, user_id: Optional[str] = None):
-        """清除Token缓存
-
-        Args:
-            user_id: 指定用户ID，None表示清除所有
-        """
-        if user_id:
-            # 清除指定用户的缓存
-            keys_to_remove = [
-                k for k, v in self._token_cache.items()
-                if v.user_id == user_id
-            ]
-            for key in keys_to_remove:
-                del self._token_cache[key]
-            logger.info(f"已清除用户缓存: {user_id}")
+    def clear_cache(self, username: Optional[str] = None):
+        """清除 Token 缓存"""
+        if username:
+            keys = [k for k, v in self._cache.items() if v.username == username]
+            for k in keys:
+                del self._cache[k]
+            logger.info(f"已清除用户缓存: {username}")
         else:
-            self._token_cache.clear()
-            logger.info("已清除所有Token缓存")
+            self._cache.clear()
+            logger.info("已清除所有 Token 缓存")
+
+    def is_valid(self, username: str, password: str) -> bool:
+        """检查 Token 是否有效"""
+        info = self._cache.get(self._cache_key(username, password))
+        return bool(info and time.time() < info.expires_at - self.REFRESH_BUFFER)
 
     def get_cache_stats(self) -> Dict:
-        """获取缓存统计信息
-
-        Returns:
-            缓存统计
-        """
-        total = len(self._token_cache)
-        expired = sum(
-            1 for t in self._token_cache.values()
-            if time.time() >= t.expires_at - self._buffer_seconds
+        """获取缓存统计"""
+        total = len(self._cache)
+        valid = sum(
+            1 for t in self._cache.values()
+            if time.time() < t.expires_at - self.REFRESH_BUFFER
         )
-        valid = total - expired
+        return {"total": total, "valid": valid, "expired": total - valid}
 
-        return {
-            "total": total,
-            "valid": valid,
-            "expired": expired
-        }
+    # ─────────────────────────────────────────
+    # 内部方法
+    # ─────────────────────────────────────────
 
-    def _get_cache_key(self, user_id: str, password: str) -> str:
-        """生成缓存Key"""
-        return f"{user_id}:{hash(password) % 100000}"
+    async def _do_login(self, username: str, password: str, cache_key: str) -> str:
+        """执行登录并缓存 Token"""
+        logger.info(f"正在登录用户: {username}")
+        try:
+            token = await self.api_client.login(
+                username=username,
+                password=password,
+                code="",    # 开放 API 登录无需验证码
+                uuid="",
+            )
+            # 腾云商旅 JWT 有效期很长，这里按保守值缓存
+            self._cache[cache_key] = TokenInfo(
+                access_token=token,
+                expires_at=time.time() + self.DEFAULT_EXPIRES_IN,
+                username=username,
+            )
+            logger.info(f"用户登录成功: {username}")
+            return token
+        except Exception as e:
+            logger.error(f"用户登录失败: {username}, 错误: {e}")
+            raise
 
-    def is_token_valid(self, user_id: str, password: str) -> bool:
-        """检查Token是否有效
-
-        Args:
-            user_id: 用户ID
-            password: 用户密码
-
-        Returns:
-            Token是否有效
-        """
-        cache_key = self._get_cache_key(user_id, password)
-        if cache_key not in self._token_cache:
-            return False
-
-        token_info = self._token_cache[cache_key]
-        return time.time() < token_info.expires_at - self._buffer_seconds
-
-    def get_token_info(self, user_id: str, password: str) -> Optional[TokenInfo]:
-        """获取Token信息
-
-        Args:
-            user_id: 用户ID
-            password: 用户密码
-
-        Returns:
-            Token信息，如果不存在返回None
-        """
-        cache_key = self._get_cache_key(user_id, password)
-        return self._token_cache.get(cache_key)
-
-    def set_token(
-        self,
-        user_id: str,
-        password: str,
-        access_token: str,
-        refresh_token: Optional[str] = None,
-        expires_in: Optional[int] = None
-    ):
-        """手动设置Token（用于测试或外部Token）
-
-        Args:
-            user_id: 用户ID
-            password: 用户密码
-            access_token: 访问令牌
-            refresh_token: 刷新令牌
-            expires_in: 有效期（秒）
-        """
-        cache_key = self._get_cache_key(user_id, password)
-        expires_in = expires_in or self._default_expires_in
-
-        token_info = TokenInfo(
-            access_token=access_token,
-            refresh_token=refresh_token,
-            expires_at=time.time() + expires_in,
-            user_id=user_id
-        )
-        self._token_cache[cache_key] = token_info
-
-        logger.info(f"手动设置Token: {user_id}, 有效期: {expires_in}秒")
+    @staticmethod
+    def _cache_key(username: str, password: str) -> str:
+        return f"{username}:{hash(password) % 1_000_000}"

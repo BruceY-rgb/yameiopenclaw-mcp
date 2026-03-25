@@ -1,405 +1,243 @@
 """
-航班相关MCP工具
+航班相关 MCP 工具
 
-提供航班查询、详情获取、计价等功能。
+提供以下能力：
+  - 用户登录（步骤 4）
+  - 国际机票查询（步骤 5）
+  - 国际机票退改签条款查询
+  - 国际机票订单详情查询
 """
 
 import logging
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field
 from fastmcp import FastMCP
 
-from src.api.client import MeiyaApiClient
+from src.api.client import OntuotuApiClient
 from src.workflow.orchestrator import WorkflowOrchestrator
 
 logger = logging.getLogger(__name__)
 
 
-# ===========================================
+# ═══════════════════════════════════════════════
 # 数据模型
-# ===========================================
+# ═══════════════════════════════════════════════
 
-class SearchFlightsInput(BaseModel):
-    """查询航班输入"""
-    origin: str = Field(
-        ...,
-        description="出发地机场代码，如PEK（北京首都）、PVG（上海浦东）、CAN（广州白云）",
-        pattern="^[A-Z]{3}$",
-        examples=["PEK", "PVG", "CAN", "JFK", "LHR"]
+class LoginInput(BaseModel):
+    """用户登录输入（步骤 4）"""
+    username: str = Field(..., description="用户名（由步骤 3 创建）")
+    password: str = Field(..., description="密码（由步骤 3 创建）")
+    force_refresh: bool = Field(
+        default=False,
+        description="是否强制重新登录（忽略缓存）"
     )
-    destination: str = Field(
+
+
+class LoginOutput(BaseModel):
+    """用户登录输出"""
+    success: bool = Field(..., description="是否成功")
+    message: str = Field(default="", description="提示信息")
+    token: str = Field(default="", description="登录 Token（后续请求自动携带）")
+
+
+class SearchIntlFlightsInput(BaseModel):
+    """国际机票查询输入（步骤 5）"""
+    from_city: str = Field(
         ...,
-        description="目的地机场代码，如JFK（纽约肯尼迪）、LHR（伦敦希思罗）、NRT（东京）",
-        pattern="^[A-Z]{3}$",
-        examples=["JFK", "LHR", "NRT", "CDG", "SFO"]
+        description="出发城市/机场代码，如 PEK（北京）、PVG（上海）、CAN（广州）",
+        examples=["PEK", "PVG", "CAN"]
     )
-    departure_date: str = Field(
+    to_city: str = Field(
         ...,
-        description="出发日期，格式YYYY-MM-DD",
+        description="目的地城市/机场代码，如 JFK（纽约）、LHR（伦敦）、NRT（东京）",
+        examples=["JFK", "LHR", "NRT"]
+    )
+    from_date: str = Field(
+        ...,
+        description="出发日期，格式 yyyy-MM-dd",
         pattern="^\\d{4}-\\d{2}-\\d{2}$",
-        examples=["2026-04-01", "2026-05-15"]
+        examples=["2026-05-01"]
     )
-    adults: int = Field(
+    trip_type: int = Field(
         default=1,
-        description="成人数量（1-9）",
+        description="行程类型：1=单程，2=往返",
         ge=1,
-        le=9
-    )
-    children: int = Field(
-        default=0,
-        description="儿童数量（2-12岁）",
-        ge=0,
-        le=5
-    )
-    infants: int = Field(
-        default=0,
-        description="婴儿数量（0-2岁）",
-        ge=0,
         le=2
     )
-    cabin_class: str = Field(
-        default="economy",
-        description="舱位等级: economy（经济舱）/ business（商务舱）/ first（头等舱）",
-        pattern="^(economy|business|first)$"
-    )
-    trip_type: str = Field(
-        default="one_way",
-        description="行程类型: one_way（单程）/ round_trip（往返）",
-        pattern="^(one_way|round_trip)$"
+    adult_count: int = Field(default=1, description="成人数量", ge=1, le=9)
+    child_count: int = Field(default=0, description="儿童数量（2-12岁）", ge=0, le=5)
+    infant_count: int = Field(default=0, description="婴儿数量（0-2岁）", ge=0, le=2)
+    cabin: str = Field(
+        default="Y",
+        description="舱位：Y=经济舱，C=商务舱，F=头等舱",
+        pattern="^[YCF]$"
     )
     return_date: Optional[str] = Field(
         None,
-        description="返程日期（往返时必填），格式YYYY-MM-DD",
+        description="返程日期（往返时必填），格式 yyyy-MM-dd",
         pattern="^\\d{4}-\\d{2}-\\d{2}$"
     )
 
 
-class SearchFlightsOutput(BaseModel):
-    """查询航班输出"""
+class SearchIntlFlightsOutput(BaseModel):
+    """国际机票查询输出"""
     success: bool = Field(..., description="是否成功")
     message: str = Field(default="", description="提示信息")
-    total: int = Field(default=0, description="航班总数")
-    flights: List[dict] = Field(default_factory=list, description="航班列表")
-    search_id: Optional[str] = Field(None, description="搜索ID（用于异步查询）")
+    data: Optional[Dict[str, Any]] = Field(None, description="查询结果（含航班列表）")
 
 
-class FlightDetailsInput(BaseModel):
-    """获取航班详情输入"""
-    flight_id: str = Field(
+class QueryIntlTicketRuleInput(BaseModel):
+    """国际机票退改签条款查询输入"""
+    body: Dict[str, Any] = Field(
         ...,
-        description="航班ID（从search_international_flights返回）",
-        examples=["FL123456", "flight_abc123"]
+        description="查询参数（参考 /api/flight/queryIntlShoppingRule 接口文档）"
     )
 
 
-class FlightDetailsOutput(BaseModel):
-    """获取航班详情输出"""
-    success: bool = Field(..., description="是否成功")
-    message: str = Field(default="", description="提示信息")
-    data: Optional[dict] = Field(None, description="航班详情")
-
-
-class PricingInput(BaseModel):
-    """航班计价输入"""
-    flight_id: str = Field(
+class QueryIntlOrderDetailInput(BaseModel):
+    """国际机票订单详情查询输入"""
+    body: Dict[str, Any] = Field(
         ...,
-        description="航班ID",
-        examples=["FL123456"]
+        description="查询参数（参考 /api/flight/intldetail 接口文档）"
     )
-    cabin_class: str = Field(
-        default="economy",
-        description="舱位等级: economy/business/first",
-        pattern="^(economy|business|first)$"
-    )
-    adults: int = Field(default=1, description="成人数量", ge=1, le=9)
-    children: int = Field(default=0, description="儿童数量", ge=0, le=5)
-    infants: int = Field(default=0, description="婴儿数量", ge=0, le=2)
 
 
-class PricingOutput(BaseModel):
-    """航班计价输出"""
+class GenericOutput(BaseModel):
+    """通用输出"""
     success: bool = Field(..., description="是否成功")
     message: str = Field(default="", description="提示信息")
-    data: Optional[dict] = Field(None, description="计价结果")
+    data: Optional[Dict[str, Any]] = Field(None, description="响应数据")
 
 
-class TicketRuleInput(BaseModel):
-    """退改签规则查询输入"""
-    flight_id: str = Field(..., description="航班ID")
-    cabin_class: str = Field(default="economy", description="舱位等级")
-
-
-class TicketRuleOutput(BaseModel):
-    """退改签规则查询输出"""
-    success: bool = Field(..., description="是否成功")
-    message: str = Field(default="", description="提示信息")
-    data: Optional[dict] = Field(None, description="退改签规则")
-
-
-# ===========================================
-# 工具注册函数
-# ===========================================
+# ═══════════════════════════════════════════════
+# 工具注册
+# ═══════════════════════════════════════════════
 
 def register_flight_tools(
     mcp: FastMCP,
-    api_client: MeiyaApiClient,
-    workflow: Optional[WorkflowOrchestrator] = None
+    api_client: OntuotuApiClient,
+    workflow: Optional[WorkflowOrchestrator] = None,
 ):
-    """注册航班相关工具"""
+    """注册航班相关 MCP 工具"""
 
     @mcp.tool()
-    async def search_international_flights(input: SearchFlightsInput) -> SearchFlightsOutput:
+    async def login_user(input: LoginInput) -> LoginOutput:
         """
-        查询国际航班
+        用户登录（步骤 4）
 
-        根据出发地、目的地和日期查询可用的国际航班。
-        支持单程和往返查询，可以指定乘客数量和舱位等级。
+        使用用户账号密码调用登录接口，获取 Token。
+        Token 会自动缓存并注入到后续所有请求中，无需手动传递。
 
-        返回航班列表，包含航班号、起降时间、价格、舱位等信息。
-        如果数据量大，会返回search_id用于异步获取完整结果。
+        前置条件：
+          - 已通过步骤 3（create_user_account）创建了用户账号
 
-        使用示例:
-        - 北京到纽约单程: origin="PEK", destination="JFK", departure_date="2026-04-01"
-        - 上海到伦敦往返: origin="PVG", destination="LHR", trip_type="round_trip", return_date="2026-04-10"
+        使用示例：
+          {"username": "user001", "password": "Pass@123"}
         """
+        if not workflow:
+            return LoginOutput(success=False, message="服务未初始化")
+
         try:
-            logger.info(
-                f"查询航班: {input.origin} -> {input.destination}, "
-                f"日期: {input.departure_date}, 成人: {input.adults}"
+            result = await workflow.login_user(
+                username=input.username,
+                password=input.password,
+                force_refresh=input.force_refresh,
             )
+            return LoginOutput(
+                success=result["success"],
+                message=result["message"],
+                token=result.get("token", ""),
+            )
+        except Exception as e:
+            logger.error(f"登录失败: {e}")
+            return LoginOutput(success=False, message=str(e))
 
-            # 调用Shopping接口
-            response = await api_client.search_flights(
-                origin=input.origin,
-                destination=input.destination,
-                departure_date=input.departure_date,
-                adults=input.adults,
-                children=input.children,
-                infants=input.infants,
-                cabin_class=input.cabin_class,
+    @mcp.tool()
+    async def search_international_flights(
+        input: SearchIntlFlightsInput,
+    ) -> SearchIntlFlightsOutput:
+        """
+        查询国际机票（步骤 5）
+
+        使用已登录的 Token，通过 /api/flight/intlsearch 查询国际航班列表。
+
+        前置条件：
+          - 已通过 login_user 完成登录
+
+        支持单程和往返查询，可指定乘客数量和舱位等级。
+        返回航班列表，包含 flightId、serialNumber、价格、舱位等信息，
+        其中 flightId 和 serialNumber 用于后续下单。
+
+        使用示例（北京→纽约单程）：
+          {
+            "from_city": "PEK",
+            "to_city": "JFK",
+            "from_date": "2026-06-01",
+            "adult_count": 1
+          }
+        """
+        if not workflow:
+            return SearchIntlFlightsOutput(success=False, message="服务未初始化")
+
+        try:
+            result = await workflow.search_intl_flights(
+                from_city=input.from_city,
+                to_city=input.to_city,
+                from_date=input.from_date,
                 trip_type=input.trip_type,
-                return_date=input.return_date
+                adult_count=input.adult_count,
+                child_count=input.child_count,
+                infant_count=input.infant_count,
+                cabin=input.cabin,
+                return_date=input.return_date,
             )
-
-            data = response.get("data", {})
-
-            # 检查是否异步返回
-            if "searchId" in data:
-                return SearchFlightsOutput(
-                    success=True,
-                    message="查询已提交，请使用search_id获取结果",
-                    search_id=data["searchId"]
-                )
-
-            # 同步返回结果
-            flights = data.get("flights", [])
-
-            logger.info(f"查询成功，找到 {len(flights)} 个航班")
-
-            return SearchFlightsOutput(
-                success=True,
-                message=f"找到 {len(flights)} 个航班",
-                total=len(flights),
-                flights=flights
+            return SearchIntlFlightsOutput(
+                success=result["success"],
+                message=result["message"],
+                data=result.get("data"),
             )
-
         except Exception as e:
-            logger.error(f"查询航班失败: {e}")
-            return SearchFlightsOutput(
-                success=False,
-                message=f"查询失败: {str(e)}"
-            )
+            logger.error(f"查询国际机票失败: {e}")
+            return SearchIntlFlightsOutput(success=False, message=str(e))
 
     @mcp.tool()
-    async def get_flight_details(input: FlightDetailsInput) -> FlightDetailsOutput:
+    async def query_intl_ticket_rule(
+        input: QueryIntlTicketRuleInput,
+    ) -> GenericOutput:
         """
-        获取航班详情
+        查询国际机票退改签条款
 
-        根据航班ID获取详细的航班信息，包括：
-        - 航班号、航空公司
-        - 起降时间、机场
-        - 机型、餐食
-        - 行李额度
-        - 退改签规则
+        调用 /api/flight/queryIntlShoppingRule 接口，
+        获取指定航班的退票、改签规则及费用。
 
-        Args:
-            flight_id: 航班ID（从search_international_flights返回）
-
-        Returns:
-            航班详细信息
+        前置条件：
+          - 已通过 login_user 完成登录
         """
         try:
-            logger.info(f"获取航班详情: flight_id={input.flight_id}")
-
-            response = await api_client.get_flight_details(input.flight_id)
-
-            return FlightDetailsOutput(
-                success=True,
-                message="获取成功",
-                data=response.get("data", {})
-            )
-
+            resp = await api_client.query_intl_ticket_rule(input.body)
+            return GenericOutput(success=True, message="查询成功", data=resp)
         except Exception as e:
-            logger.error(f"获取航班详情失败: {e}")
-            return FlightDetailsOutput(
-                success=False,
-                message=f"获取失败: {str(e)}"
-            )
+            logger.error(f"查询国际退改签条款失败: {e}")
+            return GenericOutput(success=False, message=str(e))
 
     @mcp.tool()
-    async def pricing_flight(input: PricingInput) -> PricingOutput:
+    async def query_intl_order_detail(
+        input: QueryIntlOrderDetailInput,
+    ) -> GenericOutput:
         """
-        航班计价
+        查询国际机票订单详情
 
-        对指定航班进行计价，获取准确的价格信息。
-        价格包含：票面价、税费、燃油附加费等。
+        调用 /api/flight/intldetail 接口，
+        获取国际机票订单的详细信息，包括航班、乘客、价格等。
 
-        返回policySerialNumber，用于下单时使用。
-
-        Args:
-            flight_id: 航班ID
-            cabin_class: 舱位等级
-            passengers: 乘客数量配置
-
-        Returns:
-            价格详情，包含policySerialNumber（下单时需要）
-
-        使用示例:
-        {
-            "flight_id": "FL123456",
-            "cabin_class": "economy",
-            "adults": 1,
-            "children": 0,
-            "infants": 0
-        }
+        前置条件：
+          - 已通过 login_user 完成登录
         """
         try:
-            logger.info(f"计价: flight_id={input.flight_id}, cabin={input.cabin_class}")
-
-            passengers = {
-                "adults": input.adults,
-                "children": input.children,
-                "infants": input.infants
-            }
-
-            response = await api_client.pricing(
-                flight_id=input.flight_id,
-                cabin_class=input.cabin_class,
-                passengers=passengers
-            )
-
-            data = response.get("data", {})
-            logger.info(f"计价成功: policy_serial_number={data.get('policySerialNumber')}")
-
-            return PricingOutput(
-                success=True,
-                message="计价成功",
-                data=data
-            )
-
+            resp = await api_client.query_intl_order_detail(input.body)
+            return GenericOutput(success=True, message="查询成功", data=resp)
         except Exception as e:
-            logger.error(f"计价失败: {e}")
-            return PricingOutput(
-                success=False,
-                message=f"计价失败: {str(e)}"
-            )
+            logger.error(f"查询国际机票订单详情失败: {e}")
+            return GenericOutput(success=False, message=str(e))
 
-    @mcp.tool()
-    async def query_ticket_rule(input: TicketRuleInput) -> TicketRuleOutput:
-        """
-        查询退改签规则
-
-        查询航班的退票、改签、签转规则及费用。
-
-        Args:
-            flight_id: 航班ID
-            cabin_class: 舱位等级
-
-        Returns:
-            退改签规则详情
-        """
-        try:
-            logger.info(f"查询退改签规则: flight_id={input.flight_id}")
-
-            response = await api_client.query_ticket_rule(
-                flight_id=input.flight_id,
-                cabin_class=input.cabin_class
-            )
-
-            return TicketRuleOutput(
-                success=True,
-                message="查询成功",
-                data=response.get("data", {})
-            )
-
-        except Exception as e:
-            logger.error(f"查询退改签规则失败: {e}")
-            return TicketRuleOutput(
-                success=False,
-                message=f"查询失败: {str(e)}"
-            )
-
-    @mcp.tool()
-    async def get_more_price(flight_id: str, cabin_class: str = "economy") -> dict:
-        """
-        获取更多价格（全舱位）
-
-        获取航班所有舱位的价格信息，方便比较。
-
-        Args:
-            flight_id: 航班ID
-            cabin_class: 舱位等级
-
-        Returns:
-            所有舱位的价格列表
-        """
-        try:
-            logger.info(f"获取更多价格: flight_id={flight_id}")
-
-            response = await api_client.get_more_price(flight_id, cabin_class)
-
-            return {
-                "success": True,
-                "message": "获取成功",
-                "data": response.get("data", {})
-            }
-
-        except Exception as e:
-            logger.error(f"获取更多价格失败: {e}")
-            return {
-                "success": False,
-                "message": f"获取失败: {str(e)}"
-            }
-
-    @mcp.tool()
-    async def query_stopover(flight_id: str) -> dict:
-        """
-        查询经停信息
-
-        查询航班是否有经停，以及经停详情。
-
-        Args:
-            flight_id: 航班ID
-
-        Returns:
-            经停信息
-        """
-        try:
-            logger.info(f"查询经停: flight_id={flight_id}")
-
-            response = await api_client.query_stopover(flight_id)
-
-            return {
-                "success": True,
-                "message": "查询成功",
-                "data": response.get("data", {})
-            }
-
-        except Exception as e:
-            logger.error(f"查询经停失败: {e}")
-            return {
-                "success": False,
-                "message": f"查询失败: {str(e)}"
-            }
-
-    logger.info("航班工具注册完成")
+    logger.info("航班工具注册完成（login_user / search_international_flights / query_intl_ticket_rule / query_intl_order_detail）")

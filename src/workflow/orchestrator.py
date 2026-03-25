@@ -1,366 +1,370 @@
 """
 工作流编排器
 
-负责管理多步骤业务流程，包括航班查询、计价、预订、支付等完整工作流。
+按照 7 步业务流程编排各接口调用：
+  1. 运营后台创建公司账号密钥（人工操作，不在此处）
+  2. 小龙虾配置公司账号密钥（环境变量，不在此处）
+  3. create_user_account()  — 使用公司密钥创建用户账号
+  4. login_user()           — 使用用户账号密码登录，获取 Token
+  5. search_intl_flights()  — 使用 Token 查询国际机票
+  6. create_passenger()     — 使用 Token 创建出行人
+  7. book_intl_flight()     — 使用 Token 国际机票下单
 """
 
 import logging
-from typing import Dict, Any, List, Optional
+from typing import Any, Dict, List, Optional
 
-from src.api.client import MeiyaApiClient
+from src.api.client import OntuotuApiClient
 from src.auth.manager import AuthManager
 
 logger = logging.getLogger(__name__)
 
 
-class WorkflowError(Exception):
-    """工作流执行错误"""
-
-    def __init__(self, message: str, step: str = "", details: Optional[Dict] = None):
-        super().__init__(message)
-        self.message = message
-        self.step = step
-        self.details = details or {}
-
-    def __str__(self):
-        if self.step:
-            return f"[步骤: {self.step}] {self.message}"
-        return self.message
-
-
 class WorkflowOrchestrator:
-    """工作流编排器
+    """工作流编排器"""
 
-    负责编排和管理多步骤的业务流程，包括：
-    - 预订工作流（查询→计价→生单→验价验舱）
-    - 支付工作流（验价验舱→确认支付）
-    - 取消工作流（取消订单）
-
-    注意：美亚航旅 API 没有独立的"出行人"管理接口，乘客信息直接在生单
-    (TOOrderSave) 时通过 passengerList 字段传入，因此本工作流不再包含
-    "创建出行人"步骤。
-    """
-
-    def __init__(
-        self,
-        api_client: MeiyaApiClient,
-        auth_manager: Optional[AuthManager] = None
-    ):
-        """初始化工作流编排器
-
-        Args:
-            api_client: API客户端实例
-            auth_manager: 认证管理器实例（可选，当前美亚 API 使用 Header 签名认证，
-                          不依赖 auth_manager，保留参数仅为兼容性）
-        """
+    def __init__(self, api_client: OntuotuApiClient, auth_manager: AuthManager):
         self.api_client = api_client
         self.auth_manager = auth_manager
 
-    async def execute_booking_workflow(
-        self,
-        context: Dict[str, Any]
-    ) -> Dict[str, Any]:
-        """执行预订工作流
+    # ─────────────────────────────────────────
+    # 步骤 3：创建用户账号（公司密钥鉴权）
+    # ─────────────────────────────────────────
 
-        完整流程：
-        1. 查询航班（若未提供 flight_id 和 serial_number）
-        2. 计价（Pricing）
-        3. 生单（TOOrderSave）
-        4. 验价验舱（OrderPayVer）
+    async def create_user_account(
+        self,
+        username: str,
+        password: str,
+        real_name: Optional[str] = None,
+        phone: Optional[str] = None,
+        email: Optional[str] = None,
+        extra: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """步骤 3：使用公司密钥，通过开放接口创建用户账号
 
         Args:
-            context: 工作流上下文，必须包含：
-                - dep_airport: 出发地机场代码（如 PEK）
-                - arr_airport: 目的地机场代码（如 JFK）
-                - dep_date: 出发日期（YYYY-MM-DD）
-                - airline: 出票航司二字码（如 CA、MU）
-                - passengers: 乘客列表（符合 TOOrderSave passengerList 格式）
-                - contact: 联系人信息（符合 TOOrderSave contact 格式）
-              可选包含：
-                - flight_id: 航班 ID（已知时跳过查询步骤）
-                - serial_number: Shopping 接口返回的 serialNumber
-                - adults: 成人数量（默认 1）
-                - children: 儿童数量（默认 0）
-                - infants: 婴儿数量（默认 0）
-                - cabin_types: 舱位列表（默认 ["0"] 经济舱）
-                - create_order_type: 下单方式（默认 1=实时航班）
+            username: 用户名
+            password: 密码
+            real_name: 真实姓名（可选）
+            phone: 手机号（可选）
+            email: 邮箱（可选）
+            extra: 其他扩展字段
 
         Returns:
-            工作流执行结果，包含 order_id、status 等
+            {"success": bool, "message": str, "data": {...}}
         """
-        workflow_context = {
-            **context,
-            "steps_completed": [],
-            "errors": []
+        logger.info(f"[步骤3] 创建用户账号: {username}")
+        try:
+            resp = await self.api_client.create_user(
+                username=username,
+                password=password,
+                real_name=real_name,
+                phone=phone,
+                email=email,
+                extra=extra,
+            )
+            return {
+                "success": True,
+                "message": "用户账号创建成功",
+                "data": resp,
+            }
+        except Exception as e:
+            logger.error(f"[步骤3] 创建用户账号失败: {e}")
+            return {"success": False, "message": str(e), "data": None}
+
+    # ─────────────────────────────────────────
+    # 步骤 4：登录获取 Token
+    # ─────────────────────────────────────────
+
+    async def login_user(
+        self,
+        username: str,
+        password: str,
+        force_refresh: bool = False,
+    ) -> Dict[str, Any]:
+        """步骤 4：使用用户账号密码登录，获取 Token，并注入到 api_client
+
+        Args:
+            username: 用户名
+            password: 密码
+            force_refresh: 强制重新登录
+
+        Returns:
+            {"success": bool, "message": str, "token": str}
+        """
+        logger.info(f"[步骤4] 用户登录: {username}")
+        try:
+            token = await self.auth_manager.get_token(
+                username=username,
+                password=password,
+                force_refresh=force_refresh,
+            )
+            # 将 Token 注入到 api_client，后续所有请求自动携带
+            self.api_client.set_token(token)
+            return {
+                "success": True,
+                "message": "登录成功",
+                "token": token,
+            }
+        except Exception as e:
+            logger.error(f"[步骤4] 用户登录失败: {e}")
+            return {"success": False, "message": str(e), "token": ""}
+
+    # ─────────────────────────────────────────
+    # 步骤 5：查询国际机票
+    # ─────────────────────────────────────────
+
+    async def search_intl_flights(
+        self,
+        from_city: str,
+        to_city: str,
+        from_date: str,
+        trip_type: int = 1,
+        adult_count: int = 1,
+        child_count: int = 0,
+        infant_count: int = 0,
+        cabin: str = "Y",
+        return_date: Optional[str] = None,
+        extra: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """步骤 5：使用 Token 查询国际机票分页
+
+        Args:
+            from_city: 出发城市/机场代码（如 PEK、PVG）
+            to_city: 目的地城市/机场代码（如 JFK、LHR）
+            from_date: 出发日期（yyyy-MM-dd）
+            trip_type: 行程类型（1=单程 2=往返）
+            adult_count: 成人数量
+            child_count: 儿童数量
+            infant_count: 婴儿数量
+            cabin: 舱位（Y=经济 C=商务 F=头等）
+            return_date: 返程日期（往返时必填）
+            extra: 其他扩展参数
+
+        Returns:
+            {"success": bool, "message": str, "data": {...}}
+        """
+        logger.info(f"[步骤5] 查询国际机票: {from_city} -> {to_city}, {from_date}")
+        body: Dict[str, Any] = {
+            "tripType": trip_type,
+            "fromCity": from_city,
+            "toCity": to_city,
+            "fromDate": from_date,
+            "adultCount": adult_count,
+            "childCount": child_count,
+            "infantCount": infant_count,
+            "cabin": cabin,
         }
+        if return_date:
+            body["returnDate"] = return_date
+        if extra:
+            body.update(extra)
 
         try:
-            # 步骤1: 如果没有提供 flight_id，先查询航班
-            if not context.get("flight_id") or not context.get("serial_number"):
-                flights_result = await self._search_flights(workflow_context)
-                if not flights_result:
-                    raise WorkflowError("未找到可用航班", step="search_flights")
-                workflow_context["steps_completed"].append("search_flights")
-
-            # 步骤2: 计价
-            pricing_result = await self._pricing(workflow_context)
-            workflow_context["policy_serial_number"] = pricing_result.get("policySerialNumber") or \
-                (pricing_result.get("detail") or [{}])[0].get("serialNumber")
-            workflow_context["steps_completed"].append("pricing")
-
-            # 步骤3: 生单
-            order_result = await self._create_order(workflow_context)
-            workflow_context["order_id"] = (
-                order_result.get("orderId") or
-                (order_result.get("detail") or {}).get("orderId")
-            )
-            workflow_context["order"] = order_result
-            workflow_context["steps_completed"].append("create_order")
-
-            # 步骤4: 验价验舱
-            verify_result = await self._verify_order(workflow_context)
-            workflow_context["verify_result"] = verify_result
-            workflow_context["steps_completed"].append("verify_order")
-
-            logger.info(f"预订工作流完成: order_id={workflow_context.get('order_id')}")
-
-            return {
-                "success": True,
-                "order_id": workflow_context.get("order_id"),
-                "status": "pending_payment",
-                "message": "预订成功，请完成支付",
-                "steps_completed": workflow_context["steps_completed"]
-            }
-
-        except WorkflowError:
-            raise
+            resp = await self.api_client.search_intl_flights(body)
+            return {"success": True, "message": "查询成功", "data": resp}
         except Exception as e:
-            logger.error(f"预订工作流执行失败: {e}")
-            await self._handle_error(e, workflow_context)
-            raise WorkflowError(
-                f"预订失败: {str(e)}",
-                step=workflow_context.get("current_step", "unknown"),
-                details={"context": workflow_context}
-            )
+            logger.error(f"[步骤5] 查询国际机票失败: {e}")
+            return {"success": False, "message": str(e), "data": None}
 
-    async def _search_flights(self, context: Dict[str, Any]) -> List[Dict[str, Any]]:
-        """查询航班（内部步骤）
+    # ─────────────────────────────────────────
+    # 步骤 6：创建出行人
+    # ─────────────────────────────────────────
 
-        调用 Shopping 接口，将第一个可用航班的 flightID 和 serialNumber
-        写回 context，供后续步骤使用。
+    async def create_passenger(
+        self,
+        name: str,
+        passenger_type: int,
+        nationality: str,
+        id_type: str,
+        id_number: str,
+        id_expiration: str,
+        gender: int,
+        birthday: str,
+        phone: Optional[str] = None,
+        email: Optional[str] = None,
+        extra: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """步骤 6：使用 Token 创建出行人
+
+        Args:
+            name: 姓名
+            passenger_type: 乘客类型（0=成人 1=儿童 2=婴儿）
+            nationality: 国籍二字码（如 CN、US）
+            id_type: 证件类型（0=护照 1=其他 3=港澳通行证 等）
+            id_number: 证件号码
+            id_expiration: 证件有效期（yyyy-MM-dd）
+            gender: 性别（1=男 0=女）
+            birthday: 出生日期（yyyy-MM-dd）
+            phone: 手机号（可选）
+            email: 邮箱（可选）
+            extra: 其他扩展字段
+
+        Returns:
+            {"success": bool, "message": str, "passenger_id": str, "data": {...}}
         """
-        context["current_step"] = "search_flights"
-
-        dep_airport = context.get("dep_airport", "")
-        arr_airport = context.get("arr_airport", "")
-        dep_date = context.get("dep_date", "")
-
-        logger.info(f"查询航班: {dep_airport} -> {arr_airport}, 日期: {dep_date}")
-
-        response = await self.api_client.search_flights(
-            dep_airport=dep_airport,
-            arr_airport=arr_airport,
-            dep_date=dep_date,
-            adults=context.get("adults", 1),
-            children=context.get("children", 0),
-            infants=context.get("infants", 0),
-            cabin_types=context.get("cabin_types", ["0"]),
-            trip_type=context.get("trip_type", "1"),
-            return_date=context.get("return_date")
-        )
-
-        # 解析 Shopping 接口返回结构
-        detail = response.get("detail", {})
-        serial_number = detail.get("serialNumber")
-        flight_list = detail.get("flightDetailList", [])
-
-        if serial_number:
-            context["serial_number"] = serial_number
-
-        if flight_list:
-            first_flight = flight_list[0]
-            context["flight_id"] = first_flight.get("flightID")
-            logger.info(f"选取第一个航班: flightID={context['flight_id']}, serialNumber={serial_number}")
-
-        logger.info(f"查询到 {len(flight_list)} 个航班")
-        return flight_list
-
-    async def _pricing(self, context: Dict[str, Any]) -> Dict[str, Any]:
-        """航班计价（内部步骤）
-
-        使用实时航班计价模式（需要 serialNumber + flightID）。
-        """
-        context["current_step"] = "pricing"
-
-        flight_id = context.get("flight_id", "")
-        serial_number = context.get("serial_number", "")
-        airline = context.get("airline", "")
-
-        logger.info(f"计价: flightID={flight_id}, serialNumber={serial_number}")
-
-        # 构建乘客类型列表
-        passengers = []
-        adults = context.get("adults", 1)
-        children = context.get("children", 0)
-        infants = context.get("infants", 0)
-        if adults > 0:
-            passengers.append({"passengerType": 0, "passengerCount": adults})
-        if children > 0:
-            passengers.append({"passengerType": 1, "passengerCount": children})
-        if infants > 0:
-            passengers.append({"passengerType": 2, "passengerCount": infants})
-
-        response = await self.api_client.pricing(
-            flight_id=flight_id,
-            serial_number=serial_number,
-            airline=airline,
-            passengers=passengers
-        )
-
-        # 解析计价结果
-        detail_list = response.get("detail", [])
-        if detail_list:
-            first_detail = detail_list[0]
-            logger.info(f"计价完成: policySerialNumber={first_detail.get('serialNumber')}")
-            return first_detail
-
-        logger.warning("计价接口返回空 detail，使用原始响应")
-        return response
-
-    async def _create_order(self, context: Dict[str, Any]) -> Dict[str, Any]:
-        """创建订单（内部步骤）
-
-        调用 TOOrderSave 接口，使用实时航班下单模式（createOrderType=1）。
-        乘客信息直接从 context["passengers"] 获取，无需预先创建出行人。
-        """
-        context["current_step"] = "create_order"
-
-        policy_serial_number = context.get("policy_serial_number", "")
-        logger.info(f"创建订单: policySerialNumber={policy_serial_number}")
-
-        order_data = {
-            "policySerialNumber": policy_serial_number,
-            "createOrderType": context.get("create_order_type", 1),
-            "isConvert": 0,
-            "passengerList": context.get("passengers", []),
-            "contact": context.get("contact", {})
+        logger.info(f"[步骤6] 创建出行人: {name}")
+        body: Dict[str, Any] = {
+            "name": name,
+            "passengerType": passenger_type,
+            "nationality": nationality,
+            "idType": id_type,
+            "idNumber": id_number,
+            "idExpiration": id_expiration,
+            "gender": gender,
+            "birthday": birthday,
         }
+        if phone:
+            body["phone"] = phone
+        if email:
+            body["email"] = email
+        if extra:
+            body.update(extra)
 
-        response = await self.api_client.create_order(order_data)
-
-        detail = response.get("detail", {})
-        order_id = detail.get("orderId") if isinstance(detail, dict) else None
-        logger.info(f"订单创建成功: orderId={order_id}")
-        return detail if detail else response
-
-    async def _verify_order(self, context: Dict[str, Any]) -> Dict[str, Any]:
-        """验价验舱（内部步骤）"""
-        context["current_step"] = "verify_order"
-
-        order_id = context.get("order_id")
-        logger.info(f"验价验舱: orderId={order_id}")
-
-        response = await self.api_client.verify_order(order_id)
-        logger.info(f"验价验舱完成: orderId={order_id}")
-        return response.get("detail", response)
-
-    async def execute_payment_workflow(
-        self,
-        order_id: str,
-        payment_method: str = "online"
-    ) -> Dict[str, Any]:
-        """执行支付工作流
-
-        完整流程：
-        1. 验价验舱（OrderPayVer）
-        2. 确认支付（OrderPayConfirm）
-
-        Args:
-            order_id: 订单号
-            payment_method: 支付方式（online/offline）
-
-        Returns:
-            支付结果
-        """
         try:
-            logger.info(f"支付工作流 - 验价验舱: orderId={order_id}")
-            await self.api_client.verify_order(order_id)
-
-            logger.info(f"支付工作流 - 确认支付: orderId={order_id}")
-            pay_result = await self.api_client.confirm_pay(order_id, payment_method)
-
-            logger.info(f"支付工作流完成: orderId={order_id}")
-
+            resp = await self.api_client.save_passenger(body)
+            # 响应结构：{"code":"000000","value":{...}} 或 {"data":{...}}
+            data = resp.get("value") or resp.get("data") or resp
+            passenger_id = (
+                data.get("passengerId") or data.get("id") or ""
+                if isinstance(data, dict) else ""
+            )
+            logger.info(f"[步骤6] 创建出行人成功: passenger_id={passenger_id}")
             return {
                 "success": True,
-                "order_id": order_id,
-                "status": "paid",
-                "message": "支付成功",
-                "data": pay_result.get("detail", {})
+                "message": "出行人创建成功",
+                "passenger_id": passenger_id,
+                "data": data,
+            }
+        except Exception as e:
+            logger.error(f"[步骤6] 创建出行人失败: {e}")
+            return {
+                "success": False,
+                "message": str(e),
+                "passenger_id": "",
+                "data": None,
             }
 
-        except Exception as e:
-            logger.error(f"支付工作流执行失败: {e}")
-            raise WorkflowError(
-                f"支付失败: {str(e)}",
-                step="payment_workflow",
-                details={"order_id": order_id}
-            )
+    # ─────────────────────────────────────────
+    # 步骤 7：国际机票下单
+    # ─────────────────────────────────────────
 
-    async def execute_cancel_workflow(
+    async def book_intl_flight(
         self,
-        order_id: str,
-        reason: Optional[str] = None
+        flight_id: str,
+        serial_number: str,
+        passenger_ids: List[str],
+        contact_name: str,
+        contact_phone: str,
+        contact_email: Optional[str] = None,
+        policy_serial_number: Optional[str] = None,
+        extra: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
-        """执行取消工作流
+        """步骤 7：使用 Token 国际机票下单
 
         Args:
-            order_id: 订单号
-            reason: 取消原因
+            flight_id: 航班 ID（来自 intlsearch 结果）
+            serial_number: 序列号（来自 intlsearch 结果）
+            passenger_ids: 出行人 ID 列表（步骤 6 创建后获取）
+            contact_name: 联系人姓名
+            contact_phone: 联系人电话
+            contact_email: 联系人邮箱（可选）
+            policy_serial_number: 策略序列号（计价后获取，可选）
+            extra: 其他扩展字段
 
         Returns:
-            取消结果
+            {"success": bool, "message": str, "order_id": str, "data": {...}}
         """
+        logger.info(
+            f"[步骤7] 国际机票下单: flight_id={flight_id}, "
+            f"passengers={passenger_ids}"
+        )
+        body: Dict[str, Any] = {
+            "flightId": flight_id,
+            "serialNumber": serial_number,
+            "passengerList": [{"passengerId": pid} for pid in passenger_ids],
+            "contactName": contact_name,
+            "contactPhone": contact_phone,
+        }
+        if contact_email:
+            body["contactEmail"] = contact_email
+        if policy_serial_number:
+            body["policySerialNumber"] = policy_serial_number
+        if extra:
+            body.update(extra)
+
         try:
-            logger.info(f"取消订单: orderId={order_id}")
-
-            response = await self.api_client.cancel_order(order_id, reason)
-
-            logger.info(f"取消成功: orderId={order_id}")
-
+            resp = await self.api_client.save_intl_order(body)
+            data = resp.get("value") or resp.get("data") or resp
+            order_id = (
+                data.get("orderId") or data.get("id") or ""
+                if isinstance(data, dict) else ""
+            )
+            logger.info(f"[步骤7] 下单成功: order_id={order_id}")
             return {
                 "success": True,
+                "message": "下单成功",
                 "order_id": order_id,
-                "status": "cancelled",
-                "message": "订单已取消",
-                "data": response.get("detail", {})
+                "data": data,
+            }
+        except Exception as e:
+            logger.error(f"[步骤7] 下单失败: {e}")
+            return {
+                "success": False,
+                "message": str(e),
+                "order_id": "",
+                "data": None,
             }
 
-        except Exception as e:
-            logger.error(f"取消订单失败: {e}")
-            raise WorkflowError(
-                f"取消失败: {str(e)}",
-                step="cancel_workflow",
-                details={"order_id": order_id}
-            )
+    # ─────────────────────────────────────────
+    # 便捷方法：完整预订流程（步骤 4-7 串联）
+    # ─────────────────────────────────────────
 
-    async def _handle_error(self, error: Exception, context: Dict[str, Any]) -> None:
-        """错误处理
+    async def execute_full_booking(
+        self,
+        username: str,
+        password: str,
+        search_params: Dict[str, Any],
+        passenger_infos: List[Dict[str, Any]],
+        contact: Dict[str, Any],
+        flight_selection: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """完整预订流程：登录 → 查询航班 → 创建出行人 → 下单
 
-        如果订单已创建，尝试自动取消以避免悬空订单。
+        Args:
+            username: 用户名
+            password: 密码
+            search_params: 航班查询参数（传入 search_intl_flights）
+            passenger_infos: 出行人信息列表（每项传入 create_passenger）
+            contact: 联系人信息 {name, phone, email}
+            flight_selection: 选定的航班信息 {flightId, serialNumber, policySerialNumber}
+
+        Returns:
+            {"success": bool, "message": str, "order_id": str, "data": {...}}
         """
-        logger.error(f"工作流错误处理: {error}")
-        context["errors"].append({
-            "error": str(error),
-            "step": context.get("current_step", "unknown")
-        })
+        # 步骤 4：登录
+        login_result = await self.login_user(username, password)
+        if not login_result["success"]:
+            return {"success": False, "message": f"登录失败: {login_result['message']}"}
 
-        if context.get("order_id"):
-            try:
-                logger.info(f"尝试取消已创建的订单: {context['order_id']}")
-                await self.api_client.cancel_order(
-                    context["order_id"],
-                    "工作流执行失败，自动取消"
-                )
-            except Exception as e:
-                logger.error(f"自动取消订单失败: {e}")
+        # 步骤 6：创建出行人
+        passenger_ids = []
+        for pax in passenger_infos:
+            pax_result = await self.create_passenger(**pax)
+            if not pax_result["success"]:
+                return {
+                    "success": False,
+                    "message": f"创建出行人失败: {pax_result['message']}",
+                }
+            passenger_ids.append(pax_result["passenger_id"])
+
+        # 步骤 7：下单
+        return await self.book_intl_flight(
+            flight_id=flight_selection["flightId"],
+            serial_number=flight_selection["serialNumber"],
+            passenger_ids=passenger_ids,
+            contact_name=contact["name"],
+            contact_phone=contact["phone"],
+            contact_email=contact.get("email"),
+            policy_serial_number=flight_selection.get("policySerialNumber"),
+        )

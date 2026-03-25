@@ -1,14 +1,22 @@
 #!/usr/bin/env python3
 """
-美亚航旅API MCP Server
+腾云商旅 MCP Server（小龙虾 openclaw）
 
-提供国际机票查询、预订、支付等功能的MCP Server。
-使用FastMCP框架实现，支持stdio和HTTP传输模式。
+通过调用 https://sla.ontuotu.com 的 Java 后端接口，
+为 AI 助手提供国际机票查询、出行人管理、机票下单等能力。
+
+业务流程：
+  1. 运营后台创建公司，分配 AppKey / AppSecret
+  2. 小龙虾配置公司 AppKey / AppSecret（环境变量）
+  3. 小龙虾使用公司密钥调用开放接口，创建用户账号密码
+  4. 小龙虾使用用户账号密码调用登录接口，获取 Token
+  5. 小龙虾使用 Token 查询国际机票分页
+  6. 小龙虾使用 Token 创建出行人
+  7. 小龙虾使用 Token 国际机票下单
 """
 
 import os
 import sys
-import asyncio
 import logging
 from contextlib import asynccontextmanager
 from typing import AsyncIterator
@@ -17,35 +25,42 @@ from fastmcp import FastMCP
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from dotenv import load_dotenv
 
-# 加载环境变量
 load_dotenv()
 
-# 配置日志
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger(__name__)
 
 
 class Settings(BaseSettings):
-    """应用配置"""
-    model_config = SettingsConfigDict(
-        env_prefix="",
-        case_sensitive=False
-    )
+    """应用配置
 
-    # API配置
-    meiya_api_url: str = "https://api.meiya.com"
-    meiya_username: str = ""
-    meiya_password: str = ""
+    必须在环境变量（或 .env 文件）中设置：
+      ONTUOTU_APP_KEY      公司 AppKey（运营后台创建公司后获取）
+      ONTUOTU_APP_SECRET   公司 AppSecret（运营后台创建公司后获取）
 
-    # MCP配置
+    可选配置：
+      ONTUOTU_BASE_URL     API 基础地址（默认 https://sla.ontuotu.com）
+      MCP_TRANSPORT        传输模式：stdio / http / sse（默认 stdio）
+      MCP_PORT             HTTP 模式监听端口（默认 8000）
+      REQUEST_TIMEOUT      请求超时秒数（默认 30）
+      MAX_RETRIES          最大重试次数（默认 3）
+    """
+
+    model_config = SettingsConfigDict(env_prefix="", case_sensitive=False)
+
+    # 公司密钥（必填）
+    ontuotu_app_key: str = ""
+    ontuotu_app_secret: str = ""
+
+    # API 地址
+    ontuotu_base_url: str = "https://sla.ontuotu.com"
+
+    # MCP 配置
     mcp_transport: str = "stdio"
     mcp_port: int = 8000
-
-    # 日志配置
-    log_level: str = "INFO"
 
     # 请求配置
     request_timeout: float = 30.0
@@ -57,32 +72,29 @@ settings = Settings()
 
 @asynccontextmanager
 async def app_lifespan(server: FastMCP) -> AsyncIterator[dict]:
-    """应用生命周期管理
+    """应用生命周期管理"""
+    logger.info("正在初始化腾云商旅 MCP Server（小龙虾）...")
 
-    在服务启动时初始化各个组件，在服务关闭时清理资源。
-    """
-    # 启动时初始化
-    logger.info("正在初始化美亚航旅MCP Server...")
+    if not settings.ontuotu_app_key or not settings.ontuotu_app_secret:
+        logger.warning(
+            "ONTUOTU_APP_KEY 或 ONTUOTU_APP_SECRET 未设置，"
+            "创建用户账号功能将不可用"
+        )
 
-    # 检查必需的配置
-    if not settings.meiya_username or not settings.meiya_password:
-        logger.warning("MEIYA_USERNAME 或 MEIYA_PASSWORD 未设置，部分功能可能不可用")
-
-    # 导入组件
-    from src.api.client import MeiyaApiClient
+    from src.api.client import OntuotuApiClient
     from src.auth.manager import AuthManager
     from src.workflow.orchestrator import WorkflowOrchestrator
     from src.tools.flights import register_flight_tools
     from src.tools.passengers import register_passenger_tools
     from src.tools.orders import register_order_tools
 
-    # 创建API客户端
-    api_client = MeiyaApiClient(
-        base_url=settings.meiya_api_url,
-        username=settings.meiya_username,
-        password=settings.meiya_password,
+    # 创建 API 客户端
+    api_client = OntuotuApiClient(
+        app_key=settings.ontuotu_app_key,
+        app_secret=settings.ontuotu_app_secret,
+        base_url=settings.ontuotu_base_url,
         timeout=settings.request_timeout,
-        max_retries=settings.max_retries
+        max_retries=settings.max_retries,
     )
 
     # 创建认证管理器
@@ -91,51 +103,46 @@ async def app_lifespan(server: FastMCP) -> AsyncIterator[dict]:
     # 创建工作流编排器
     workflow = WorkflowOrchestrator(api_client, auth_manager)
 
-    # 注册工具
+    # 注册 MCP 工具
     register_flight_tools(server, api_client, workflow)
     register_passenger_tools(server, api_client, workflow)
     register_order_tools(server, api_client, workflow)
 
-    logger.info("美亚航旅MCP Server初始化完成")
+    logger.info("腾云商旅 MCP Server 初始化完成")
     logger.info(f"传输模式: {settings.mcp_transport}")
-    logger.info(f"API地址: {settings.meiya_api_url}")
+    logger.info(f"API 地址: {settings.ontuotu_base_url}")
 
     yield {
         "api_client": api_client,
         "auth_manager": auth_manager,
-        "workflow": workflow
+        "workflow": workflow,
     }
 
-    # 关闭时清理
-    logger.info("正在关闭美亚航旅MCP Server...")
+    logger.info("正在关闭腾云商旅 MCP Server...")
     await api_client.close()
-    logger.info("美亚航旅MCP Server已关闭")
+    logger.info("腾云商旅 MCP Server 已关闭")
 
 
-# 创建MCP Server
+# 创建 MCP Server 实例
 mcp = FastMCP(
-    "美亚航旅API",
-    lifespan=app_lifespan
+    "腾云商旅 API（小龙虾）",
+    lifespan=app_lifespan,
 )
 
 
 def main():
-    """主入口函数"""
-    # 获取传输模式
+    """主入口"""
     transport = os.getenv("MCP_TRANSPORT", settings.mcp_transport)
     port = int(os.getenv("MCP_PORT", settings.mcp_port))
 
-    logger.info(f"启动MCP Server，传输模式: {transport}")
+    logger.info(f"启动 MCP Server，传输模式: {transport}")
 
     try:
         if transport == "stdio":
-            # 标准输入输出模式（适合Claude Desktop）
             mcp.run(transport="stdio")
         elif transport == "http":
-            # HTTP模式（适合远程部署）
             mcp.run(transport="streamable-http", host="0.0.0.0", port=port)
         elif transport == "sse":
-            # SSE模式（适合实时推送）
             mcp.run(transport="sse", host="0.0.0.0", port=port)
         else:
             logger.error(f"不支持的传输模式: {transport}")
@@ -143,7 +150,7 @@ def main():
     except KeyboardInterrupt:
         logger.info("收到中断信号，正在关闭...")
     except Exception as e:
-        logger.error(f"Server错误: {e}")
+        logger.error(f"Server 错误: {e}")
         sys.exit(1)
 
 
