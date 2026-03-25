@@ -1,12 +1,59 @@
 # ===========================================
-# 美亚航旅API MCP Server Docker Compose
+# 美亚航旅 API 服务 Docker Compose
+#
+# 包含两种服务模式：
+#   1. meiya-api-server  - FastAPI 直接接口服务（推荐）
+#      解决 MCP 服务层暴露问题，通过标准 HTTP 接口对外提供能力
+#      接口文档: http://localhost:8080/docs
+#   2. meiya-mcp-server  - 原有 MCP 服务（保留，供 MCP 客户端使用）
+#      启动: docker-compose --profile mcp up
 # ===========================================
 
 version: '3.8'
 
 services:
-  # MCP Server 服务
+  # -------------------------------------------
+  # FastAPI 直接接口服务（主要服务，推荐使用）
+  # 解决 MCP 服务层暴露问题，通过标准 RESTful HTTP 接口对外提供美亚航旅能力
+  # -------------------------------------------
+  meiya-api-server:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: meiya-api-server
+    command: >
+      uvicorn src.api_server:app
+      --host 0.0.0.0
+      --port 8080
+      --workers 2
+      --log-level info
+    environment:
+      - MEIYA_API_URL=${MEIYA_API_URL:-https://api.meiya.com}
+      - MEIYA_USERNAME=${MEIYA_USERNAME}
+      - MEIYA_PASSWORD=${MEIYA_PASSWORD}
+      - REQUEST_TIMEOUT=${REQUEST_TIMEOUT:-30}
+      - MAX_RETRIES=${MAX_RETRIES:-3}
+    ports:
+      - "${API_PORT:-8080}:8080"
+    volumes:
+      - ./logs:/app/logs
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    networks:
+      - mcp-network
+
+  # -------------------------------------------
+  # MCP 服务（保留，供 Claude Desktop 等 MCP 客户端使用）
+  # 启动: docker-compose --profile mcp up
+  # -------------------------------------------
   meiya-mcp-server:
+    profiles:
+      - mcp
     build:
       context: ..
       dockerfile: docker/Dockerfile

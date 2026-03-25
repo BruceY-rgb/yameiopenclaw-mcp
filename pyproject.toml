@@ -20,6 +20,8 @@ classifiers = [
 ]
 dependencies = [
     "fastmcp>=2.0.0",
+    "fastapi>=0.111.0",
+    "uvicorn[standard]>=0.30.0",
     "httpx>=0.27.0",
     "pydantic>=2.0.0",
     "pydantic-settings>=2.0.0",
@@ -41,6 +43,7 @@ dev = [
 
 [project.scripts]
 meiya-mcp-server = "src.server:main"
+meiya-api-server = "uvicorn:main"
 
 [build-system]
 requires = ["hatchling"]
