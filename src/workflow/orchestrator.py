@@ -145,18 +145,42 @@ class WorkflowOrchestrator:
             {"success": bool, "message": str, "data": {...}}
         """
         logger.info(f"[步骤5] 查询国际机票: {from_city} -> {to_city}, {from_date}")
+
+        # 舱位映射：Y=0 经济, C=3 商务, F=4 头等
+        cabin_map = {"Y": "0", "C": "3", "F": "4"}
+        cabin_types = [cabin_map.get(cabin, "0")]
+
+        # 构建乘客列表
+        passengers = []
+        if adult_count > 0:
+            passengers.append({"passengerType": 0, "count": adult_count})  # 0=成人
+        if child_count > 0:
+            passengers.append({"passengerType": 1, "count": child_count})  # 1=儿童
+        if infant_count > 0:
+            passengers.append({"passengerType": 2, "count": infant_count})  # 2=婴儿
+
+        # 飞行偏好映射
+        direction_map = {1: "0", 2: "1"}  # 单程=不限, 往返=直飞(简化处理)
+        is_direction = direction_map.get(trip_type, "0")
+
         body: Dict[str, Any] = {
-            "tripType": trip_type,
-            "fromCity": from_city,
-            "toCity": to_city,
-            "fromDate": from_date,
-            "adultCount": adult_count,
-            "childCount": child_count,
-            "infantCount": infant_count,
-            "cabin": cabin,
+            "isDirection": is_direction,
+            "originDestinations": [
+                {
+                    "depAirport": from_city,
+                    "arrAirport": to_city,
+                    "depDate": from_date,
+                }
+            ],
+            "cabinTypes": cabin_types,
+            "passengers": passengers,
         }
-        if return_date:
-            body["returnDate"] = return_date
+
+        # 往返航程需要添加返程信息
+        if trip_type == 2 and return_date:
+            body["originDestinations"][0]["returnDate"] = return_date
+            body["tripType"] = "2"
+
         if extra:
             body.update(extra)
 
