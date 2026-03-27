@@ -12,6 +12,8 @@
 """
 
 import logging
+import base64
+import hashlib
 import httpx
 from typing import Any, Dict, Optional
 
@@ -25,13 +27,12 @@ BASE_URL = "https://sla.ontuotu.com"
 # ─────────────────────────────────────────────
 # 开放接口（公司密钥鉴权）
 # ─────────────────────────────────────────────
-API_OPEN_CREATE_USER   = "/api/open/user/create"      # 创建用户账号
+API_OPEN_CREATE_USER   = "/api/open/createUser"        # 创建用户账号
 
 # ─────────────────────────────────────────────
 # 认证接口
 # ─────────────────────────────────────────────
-API_AUTH_CAPTCHA       = "/admin-api/auth/captcha"    # 获取图片验证码
-API_AUTH_LOGIN         = "/admin-api/auth/login"      # 用户登录，返回 token
+API_AUTH_LOGIN         = "/api/auth/loginByPassword"   # 用户登录，返回 JWT token
 
 # ─────────────────────────────────────────────
 # 航班接口（Token 鉴权）
@@ -156,8 +157,8 @@ class OntuotuApiClient:
             headers["AppKey"] = self.app_key
             headers["AppSecret"] = self.app_secret
         elif self._token:
-            # Token 鉴权
-            headers["Authorization"] = self._token
+            # Token 鉴权（Bearer token）
+            headers["Authorization"] = "Bearer " + self._token
 
         if extra_headers:
             headers.update(extra_headers)
@@ -194,8 +195,6 @@ class OntuotuApiClient:
 
     async def create_user(
         self,
-        username: str,
-        password: str,
         real_name: Optional[str] = None,
         phone: Optional[str] = None,
         email: Optional[str] = None,
@@ -205,27 +204,38 @@ class OntuotuApiClient:
 
         步骤 3：小龙虾使用公司账号密钥，调用开放接口，创建用户账号密码。
 
-        Args:
-            username: 用户名
-            password: 密码
-            real_name: 真实姓名（可选）
-            phone: 手机号（可选）
-            email: 邮箱（可选）
-            extra: 其他扩展字段
+        签名算法（参考开放接口文档）：
+        1. 参数按字母 a-z 排序
+        2. 转成 JSON 字符串
+        3. Base64 编码
+        4. MD5 加密得到 hash 值
+
+        请求参数：appKey + hash（不含 secret）
+
+        注意：开放接口创建用户不需要传 username/password
+        返回的是系统生成的用户名和密码
 
         Returns:
-            创建结果，包含 userId 等信息
+            创建结果，包含 username, password
         """
+        # 生成签名 hash
+        # 1. 参数按字母 a-z 排序，构造 JSON（无空格）
+        json_str = '{"appKey":"' + self.app_key + '","secret":"' + self.app_secret + '"}'
+
+        # 2. Base64 编码
+        base64_str = base64.b64encode(json_str.encode('utf-8')).decode('utf-8')
+
+        # 3. MD5 加密
+        hash_value = hashlib.md5(base64_str.encode('utf-8')).hexdigest()
+
+        # 请求体：appKey + hash（不含 secret）
         body: Dict[str, Any] = {
-            "username": username,
-            "password": password,
+            "appKey": self.app_key,
+            "hash": hash_value,
         }
-        if real_name:
-            body["realName"] = real_name
-        if phone:
-            body["phone"] = phone
-        if email:
-            body["email"] = email
+
+        # 注意：开放接口创建用户不需要传 username/password
+        # 返回的是系统生成的用户名和密码
         if extra:
             body.update(extra)
 
@@ -233,44 +243,31 @@ class OntuotuApiClient:
             "POST",
             API_OPEN_CREATE_USER,
             json=body,
-            use_app_key=True,
         )
 
     # ─────────────────────────────────────────
     # 认证接口：登录获取 Token
     # ─────────────────────────────────────────
 
-    async def get_captcha(self) -> bytes:
-        """获取图片验证码（返回图片二进制）"""
-        response = await self.session.get(API_AUTH_CAPTCHA)
-        response.raise_for_status()
-        return response.content
-
     async def login(
         self,
         username: str,
         password: str,
-        code: str = "",
-        uuid: str = "",
     ) -> str:
-        """登录获取 Token
+        """登录获取 JWT Token
 
         步骤 4：小龙虾使用用户账号密码，调用登录接口，得到 token。
 
         Args:
             username: 用户名
             password: 密码
-            code: 图片验证码（运营后台登录需要，开放 API 登录可为空）
-            uuid: 验证码 UUID（与 code 配套）
 
         Returns:
-            token 字符串
+            JWT token 字符串
         """
         body: Dict[str, Any] = {
             "username": username,
             "password": password,
-            "code": code,
-            "uuid": uuid,
         }
         resp = await self.request("POST", API_AUTH_LOGIN, json=body)
 

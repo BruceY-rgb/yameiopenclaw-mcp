@@ -141,7 +141,7 @@ def main():
         if transport == "stdio":
             mcp.run(transport="stdio")
         elif transport == "http":
-            mcp.run(transport="streamable-http", host="0.0.0.0", port=port)
+            mcp.run(transport="http", host="0.0.0.0", port=port)
         elif transport == "sse":
             mcp.run(transport="sse", host="0.0.0.0", port=port)
         else:

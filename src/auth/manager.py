@@ -140,8 +140,6 @@ class AuthManager:
             token = await self.api_client.login(
                 username=username,
                 password=password,
-                code="",    # 开放 API 登录无需验证码
-                uuid="",
             )
             # 腾云商旅 JWT 有效期很长，这里按保守值缓存
             self._cache[cache_key] = TokenInfo(
