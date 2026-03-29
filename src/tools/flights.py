@@ -233,25 +233,46 @@ def register_flight_tools(
                 airline_en = f.get("airlineEN", "")
                 airline_code = f.get("airline", "")
 
+                # 从 brand 获取舱位等级名称
+                brand = first_finance.get("brand", [{}])[0] if first_finance.get("brand") else {}
+                cabin_brand_name = brand.get("brandNameCh", "") or brand.get("brandName", "")
+                cabin_class_code = brand.get("brandCode", "")
+
                 # 从 tripList 获取航段信息
                 trip_list = f.get("tripList", [])
                 segments = []
+                total_duration_minutes = 0
                 for trip in trip_list:
                     for flight in trip.get("flightList", []):
+                        # 解析飞行时长
+                        duration = flight.get("duration", "00:00")
+                        parts = duration.split(":")
+                        if len(parts) == 2:
+                            total_duration_minutes += int(parts[0]) * 60 + int(parts[1])
+
                         segments.append({
                             "flight_no": flight.get("flightNo", ""),
                             "airline": flight.get("airline", ""),
                             "airline_name": flight.get("airlineName", ""),
                             "dep_airport": flight.get("departureAirportCode", ""),
                             "dep_airport_name": flight.get("departureAirportName", ""),
+                            "dep_city_name": flight.get("departureCityName", ""),
+                            "dep_city_code": flight.get("departureCityCode", ""),
                             "arr_airport": flight.get("destinationAirportCode", ""),
                             "arr_airport_name": flight.get("destinationAirportName", ""),
+                            "arr_city_name": flight.get("destinationCityName", ""),
+                            "arr_city_code": flight.get("destinationCityCode", ""),
                             "dep_time": flight.get("departureDateTime", ""),
                             "arr_time": flight.get("arrivalDateTime", ""),
-                            "duration": flight.get("duration", ""),
+                            "duration": duration,
                             "cabin_type": flight.get("cabinType", ""),
                             "class_no": flight.get("classNo", ""),
                         })
+
+                # 计算总飞行时长
+                hours = total_duration_minutes // 60
+                minutes = total_duration_minutes % 60
+                total_duration = f"{hours}h {minutes}m" if hours > 0 else f"{minutes}m"
 
                 parsed_flights.append({
                     "airline_cn": airline_cn,
@@ -265,6 +286,10 @@ def register_flight_tools(
                     "cabin_class": f.get("cabinClass", ""),
                     "cabin_type": f.get("cabinType", ""),
                     "cabin_name": f.get("cabinName", ""),
+                    "cabin_brand_name": cabin_brand_name,  # 舱位等级名称
+                    "cabin_brand_code": cabin_class_code,
+                    "total_duration": total_duration,  # 总飞行时长
+                    "stop_count": len(segments) - 1 if len(segments) > 0 else 0,  # 经停次数
                     # 保留原始数据供进一步查询
                     "flight_id": f.get("flightID", ""),
                     "fare_key": f.get("fareKey", ""),

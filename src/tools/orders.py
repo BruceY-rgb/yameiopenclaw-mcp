@@ -2,8 +2,8 @@
 账号与订单相关 MCP 工具
 
 提供以下能力：
-  - 创建用户账号（步骤 3）：POST /api/open/user/create（公司密钥鉴权）
-  - 国际机票下单（步骤 7）：POST /api/flight/intlsaveOrder
+  - 创建用户账号（步骤 3）：POST /api/open/createUser（公司密钥鉴权）
+  - 国际机票下单（步骤 7）：POST /supplier/.../TOOrderSave
   - 完整预订流程（步骤 4-7 串联）
 """
 
@@ -169,7 +169,7 @@ def register_order_tools(
         """
         国际机票下单（步骤 7）
 
-        调用 /api/flight/intlsaveOrder 接口，使用已创建的出行人 ID 完成下单。
+        调用 /supplier/supplierapi/thgeneralinterface/SupplierIntlToOrder/v2/TOOrderSave 接口，使用已创建的出行人 ID 完成下单。
 
         前置条件：
           - 已通过 login_user 完成登录（步骤 4）

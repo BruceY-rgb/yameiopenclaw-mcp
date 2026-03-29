@@ -87,6 +87,7 @@ async def app_lifespan(server: FastMCP) -> AsyncIterator[dict]:
     from src.tools.flights import register_flight_tools
     from src.tools.passengers import register_passenger_tools
     from src.tools.orders import register_order_tools
+    from src.tools.airports import register_airport_tools
 
     # 创建 API 客户端
     api_client = OntuotuApiClient(
@@ -107,6 +108,7 @@ async def app_lifespan(server: FastMCP) -> AsyncIterator[dict]:
     register_flight_tools(server, api_client, workflow)
     register_passenger_tools(server, api_client, workflow)
     register_order_tools(server, api_client, workflow)
+    register_airport_tools(server)
 
     logger.info("腾云商旅 MCP Server 初始化完成")
     logger.info(f"传输模式: {settings.mcp_transport}")
