@@ -55,6 +55,10 @@ class Settings(BaseSettings):
     ontuotu_app_key: str = ""
     ontuotu_app_secret: str = ""
 
+    # 用户账号（可选，设置后启动时自动登录）
+    ontuotu_username: str = ""
+    ontuotu_password: str = ""
+
     # API 地址
     ontuotu_base_url: str = "https://sla.ontuotu.com"
 
@@ -113,6 +117,20 @@ async def app_lifespan(server: FastMCP) -> AsyncIterator[dict]:
     logger.info("腾云商旅 MCP Server 初始化完成")
     logger.info(f"传输模式: {settings.mcp_transport}")
     logger.info(f"API 地址: {settings.ontuotu_base_url}")
+
+    # 自动登录（如果配置了用户账号）
+    if settings.ontuotu_username and settings.ontuotu_password:
+        try:
+            token = await api_client.login(
+                username=settings.ontuotu_username,
+                password=settings.ontuotu_password,
+            )
+            api_client.set_token(token)
+            logger.info(f"自动登录成功: {settings.ontuotu_username}")
+        except Exception as e:
+            logger.warning(f"自动登录失败: {e}（可稍后通过 login_user 工具手动登录）")
+    else:
+        logger.info("未配置用户账号，需通过 login_user 工具登录后使用")
 
     yield {
         "api_client": api_client,

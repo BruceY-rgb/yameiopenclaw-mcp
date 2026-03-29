@@ -23,9 +23,9 @@ logger = logging.getLogger(__name__)
 # ═══════════════════════════════════════════════
 
 class CreateUserInput(BaseModel):
-    """创建用户账号输入（步骤 3）"""
-    username: str = Field(..., description="用户名")
-    password: str = Field(..., description="密码")
+    """创建用户账号输入（步骤 3）注意：开放接口创建用户不需要传 username/password，
+    系统会自动生成用户名和密码返回。
+    """
     real_name: Optional[str] = Field(None, description="真实姓名（可选）")
     phone: Optional[str] = Field(None, description="手机号（可选）")
     email: Optional[str] = Field(None, description="邮箱（可选）")
@@ -47,23 +47,36 @@ class BookIntlFlightInput(BaseModel):
     """国际机票下单输入（步骤 7）"""
     flight_id: str = Field(
         ...,
-        description="航班 ID（来自 search_international_flights 结果）"
+        description="航班 ID（来自 search_international_flights 结果的 flightID）"
     )
     serial_number: str = Field(
         ...,
-        description="序列号（来自 search_international_flights 结果）"
+        description="序列号（来自 search_international_flights 结果的 detail.serialNumber）"
     )
     passenger_ids: List[str] = Field(
         ...,
-        description="出行人 ID 列表（由 create_passenger 返回）",
+        description="出行人 ID 列表（由 list_passengers 返回的 id）",
         min_length=1
     )
     contact_name: str = Field(..., description="联系人姓名")
     contact_phone: str = Field(..., description="联系人电话")
     contact_email: Optional[str] = Field(None, description="联系人邮箱（可选）")
-    policy_serial_number: Optional[str] = Field(
+    # 新增必要参数
+    cache_expir_time: Optional[str] = Field(
         None,
-        description="策略序列号（计价后获取，可选）"
+        description="缓存过期时间（来自 search_international_flights 结果的 detail.cacheExpirTime）"
+    )
+    flight_data: Optional[Dict[str, Any]] = Field(
+        None,
+        description="完整航班数据（来自 search_international_flights 结果的 flightDetailList 中的单个航班）"
+    )
+    search_params: Optional[Dict[str, Any]] = Field(
+        None,
+        description="航班查询参数（原始搜索参数，如 {from_city, to_city, from_date, adult_count}）"
+    )
+    passenger_infos: Optional[List[Dict[str, Any]]] = Field(
+        None,
+        description="出行人详细信息列表（包含 realName, idCard, idType, phone, gender, birthday, idExpiration 等）"
     )
 
 
@@ -127,7 +140,7 @@ def register_order_tools(
         创建用户账号（步骤 3）
 
         使用公司 AppKey/AppSecret 调用开放接口 /api/open/user/create，
-        为小龙虾创建一个可以登录的用户账号。
+        系统会自动生成用户名和密码返回。
 
         前置条件：
           - 已在环境变量中配置 ONTUOTU_APP_KEY 和 ONTUOTU_APP_SECRET
@@ -135,20 +148,14 @@ def register_order_tools(
         创建成功后，使用返回的 username/password 调用 login_user（步骤 4）。
 
         使用示例：
-          {
-            "username": "user001",
-            "password": "Pass@123",
-            "real_name": "张三",
-            "phone": "13800138000"
-          }
+          {} 或带可选参数：
+          {"real_name": "张三", "phone": "13800138000"}
         """
         if not workflow:
             return CreateUserOutput(success=False, message="服务未初始化")
 
         try:
             result = await workflow.create_user_account(
-                username=input.username,
-                password=input.password,
                 real_name=input.real_name,
                 phone=input.phone,
                 email=input.email,
@@ -169,7 +176,7 @@ def register_order_tools(
         """
         国际机票下单（步骤 7）
 
-        调用 /supplier/supplierapi/thgeneralinterface/SupplierIntlToOrder/v2/TOOrderSave 接口，使用已创建的出行人 ID 完成下单。
+        调用 /api/order/createWechatPayOrder 接口，使用已创建的出行人 ID 完成下单。
 
         前置条件：
           - 已通过 login_user 完成登录（步骤 4）
@@ -180,10 +187,14 @@ def register_order_tools(
           {
             "flight_id": "FL123456",
             "serial_number": "SN20260601001",
-            "passenger_ids": ["PAX001", "PAX002"],
+            "passenger_ids": ["26"],
             "contact_name": "张三",
             "contact_phone": "13800138000",
-            "contact_email": "zhangsan@example.com"
+            "contact_email": "zhangsan@example.com",
+            "cache_expir_time": "2026-03-30 12:00:00",
+            "flight_data": {...},
+            "search_params": {...},
+            "passenger_infos": [...]
           }
         """
         if not workflow:
@@ -197,7 +208,10 @@ def register_order_tools(
                 contact_name=input.contact_name,
                 contact_phone=input.contact_phone,
                 contact_email=input.contact_email,
-                policy_serial_number=input.policy_serial_number,
+                cache_expir_time=input.cache_expir_time,
+                flight_data=input.flight_data,
+                search_params=input.search_params,
+                passenger_infos=input.passenger_infos,
             )
             return BookIntlFlightOutput(
                 success=result["success"],

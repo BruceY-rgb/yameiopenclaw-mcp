@@ -34,8 +34,6 @@ class WorkflowOrchestrator:
 
     async def create_user_account(
         self,
-        username: str,
-        password: str,
         real_name: Optional[str] = None,
         phone: Optional[str] = None,
         email: Optional[str] = None,
@@ -44,8 +42,6 @@ class WorkflowOrchestrator:
         """步骤 3：使用公司密钥，通过开放接口创建用户账号
 
         Args:
-            username: 用户名（用于后续登录）
-            password: 密码（用于后续登录）
             real_name: 真实姓名（可选）
             phone: 手机号（可选）
             email: 邮箱（可选）
@@ -54,7 +50,7 @@ class WorkflowOrchestrator:
         Returns:
             {"success": bool, "message": str, "data": {...}}
         """
-        logger.info(f"[步骤 3] 创建用户账号：{username}")
+        logger.info(f"[步骤3] 创建用户账号（real_name={real_name}, phone={phone}）")
         try:
             # 注意：api_client.create_user() 不需要 username/password 参数
             # 系统会自动生成用户名和密码返回
@@ -374,7 +370,8 @@ class WorkflowOrchestrator:
         contact_phone: str,
         contact_email: Optional[str] = None,
         policy_serial_number: Optional[str] = None,
-        # 以下参数为新接口必需
+        # 新增参数（用于构建完整请求）
+        cache_expir_time: Optional[str] = None,
         flight_data: Optional[Dict[str, Any]] = None,
         search_params: Optional[Dict[str, Any]] = None,
         passenger_infos: Optional[List[Dict[str, Any]]] = None,
@@ -445,7 +442,7 @@ class WorkflowOrchestrator:
 
         # 从 flight_data 中提取关键信息
         cabin_fare_id = ""
-        cache_expir_time = ""
+        extracted_cache_expir_time = ""  # 使用不同的变量名，避免覆盖函数参数
         trip_list = []
 
         if flight_data:
@@ -458,7 +455,7 @@ class WorkflowOrchestrator:
                     cabin_fare_id = finance_list[0].get("cabinFare", "")
 
             # 获取缓存过期时间
-            cache_expir_time = flight_data.get("cacheExpirTime", "")
+            extracted_cache_expir_time = flight_data.get("cacheExpirTime", "")
 
             # 获取航段信息
             trip_list = flight_data.get("tripList", [])
@@ -512,6 +509,10 @@ class WorkflowOrchestrator:
         # policySerialNumber: this.flightInfo.serialNumber
         # cacheExpirTime: this.flightInfo.cacheExpirTime
         # flightSearchParam: JSON.stringify(this.departParamsbefore)
+
+        # 优先使用函数参数传入的 cache_expir_time，否则使用从 flight_data 中提取的
+        final_cache_expir_time = cache_expir_time or extracted_cache_expir_time
+
         body.update({
             "orderType": 0,  # 机票订单
             "payType": 3,  # 企业余额支付
@@ -523,7 +524,7 @@ class WorkflowOrchestrator:
             "mainName": contact_name,
             "mainPhone": contact_phone,
             "flightId": flight_id,
-            "cacheExpirTime": cache_expir_time,  # 缓存过期时间
+            "cacheExpirTime": final_cache_expir_time,  # 缓存过期时间
             "flightSearchParam": json.dumps(search_params) if search_params else "{}",  # 原始搜索参数（修正参数名）
             "tenantId": 1,  # 租户 ID（参考 Vue）
             "cabinFareId": cabin_fare_id,  # 舱位票价 ID
